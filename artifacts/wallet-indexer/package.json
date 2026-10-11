@@ -17,7 +17,7 @@
     "envio": "3.10.0"
   },
   "devDependencies": {
-    "@types/node": "catalog:",
+    "@types/node": "^25.3.3",
     "typescript": "~6.0.3"
   }
 }
