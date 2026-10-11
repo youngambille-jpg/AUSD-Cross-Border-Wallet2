@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
 import { formatUnits } from 'viem';
 
-const GRAPHQL_URL = process.env.EXPO_PUBLIC_ENVIO_GRAPHQL_URL?.trim();
+const GRAPHQL_URL = process.env.EXPO_PUBLIC_ENVIO_GRAPHQL_URL?.trim()
+  || 'https://indexer.dev.hyperindex.xyz/dcec156/v1/graphql';
 const AUSD_ADDRESS = '0xa9012a055bd4e0eDfF8Ce09f960291C09D5322dC'.toLowerCase();
 const CTK_ADDRESS = '0x7BEb5D9DB0d85cBEa543C04f0dE8c23c2176cd9D'.toLowerCase();
 const USDC_ADDRESS = '0x534b2f3A21130d7a60830c2Df862319e593943A3'.toLowerCase();
