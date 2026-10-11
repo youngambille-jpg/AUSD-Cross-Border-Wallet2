@@ -1,8 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Alert, Pressable, Share, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Alert, Modal, Pressable, ScrollView, Share, StyleSheet, Text, TextInput, View } from 'react-native';
 import { Feather } from '@expo/vector-icons';
 import { router } from 'expo-router';
-import { Card, Divider, Eyebrow, Field, InlineNotice, Page, PrimaryButton, Title } from '@/components/Primitives';
+import { Card, Eyebrow, Field, InlineNotice, Page, PrimaryButton, Title } from '@/components/Primitives';
 import { useColors } from '@/hooks/useColors';
 import { getAUSDBalance } from '@/services/passkey';
 import { exportSavingsVault, importSavingsVault, loadSavingsGoals, saveSavingsGoals, type SavingsGoal } from '@/services/savings-goals';
@@ -10,6 +10,9 @@ import {
   createSavingsPocketId,
   createSponsoredSavingsPocket,
   depositToSavingsPocket,
+  withdrawFromSavingsPocketSponsored,
+  updateSavingsAutoSaveRateSponsored,
+  allocateGiftToSavingsPocketSponsored,
   giftToPersonSponsored,
   giftToPocketSponsored,
   getSavingsPocket,
@@ -26,7 +29,6 @@ import {
   type SharedPocket,
 } from '@/services/shared-pockets';
 import { useWallet } from '@/state/wallet-context';
-import { formatIndexedSavings, useIndexedActivity } from '@/services/indexed-activity';
 
 const money = (amount: number) => amount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
@@ -42,11 +44,13 @@ export default function SavingsGoalsScreen() {
   const [contribution, setContribution] = useState('');
   const [autoSaveRate, setAutoSaveRate] = useState('10');
   const [activeGoal, setActiveGoal] = useState<string | null>(null);
+  const [goalSheetMode, setGoalSheetMode] = useState<'menu' | 'deposit' | 'rate' | 'withdraw'>('menu');
+  const [utilityAmount, setUtilityAmount] = useState('');
+  const [selectedGiftGoal, setSelectedGiftGoal] = useState('');
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [backupText, setBackupText] = useState('');
-  const [showRestore, setShowRestore] = useState(false);
   const [sharedPockets, setSharedPockets] = useState<SharedPocket[]>([]);
   const [contacts, setContacts] = useState<WalletContact[]>([]);
   const [giftBalance, setGiftBalance] = useState<string | null>(null);
@@ -54,11 +58,11 @@ export default function SavingsGoalsScreen() {
   const [giftRecipient, setGiftRecipient] = useState('');
   const [giftPocket, setGiftPocket] = useState('');
   const [pocketCode, setPocketCode] = useState('');
-  const [showImport, setShowImport] = useState(false);
+  const [showCreate, setShowCreate] = useState(false);
+  const [activeSheet, setActiveSheet] = useState<'gift' | 'more' | 'shared' | 'restore' | 'gifts' | 'allocate' | null>(null);
   const account = profile?.mode === 'mera' && profile.address && profile.signerAddress && profile.passkey
     ? { address: profile.address, signerAddress: profile.signerAddress, credential: profile.passkey.credential, rpId: profile.passkey.rpId }
     : null;
-  const { savings: indexedSavings } = useIndexedActivity(account?.address);
   const onChainTotal = useMemo(
     () => goals.reduce((sum, goal) => {
       const pocket = pocketStates[goal.id];
@@ -70,6 +74,7 @@ export default function SavingsGoalsScreen() {
     () => goals.reduce((sum, goal) => sum + (goal.localTracked ?? (goal.pocketId ? 0 : goal.saved)), 0),
     [goals],
   );
+  const focusedGoal = goals.find((goal) => goal.id === activeGoal) ?? null;
 
   const refresh = useCallback(async () => {
     if (!account) {
@@ -126,7 +131,7 @@ export default function SavingsGoalsScreen() {
       await saveSharedPockets(account, nextPockets);
       setSharedPockets(nextPockets);
       setPocketCode('');
-      setShowImport(false);
+      setActiveSheet(null);
       Alert.alert('Pocket tracked', `${next.name} was added to your Savings tab.`);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Could not import this pocket code.');
@@ -167,6 +172,7 @@ export default function SavingsGoalsScreen() {
       setGiftAmount('');
       setGiftRecipient('');
       setGiftPocket('');
+      setActiveSheet(null);
       Alert.alert('Gift sent', `${result.amount} AUSD was confirmed on Monad testnet.\n\n${result.transactionHash}`);
       await refresh();
     } catch (caught) {
@@ -186,12 +192,13 @@ export default function SavingsGoalsScreen() {
     }
   }
 
-  async function withdrawReceivedGifts() {
+  async function withdrawReceivedGifts(amount: string) {
     if (!account || !giftBalance || Number(giftBalance) <= 0) return;
     setSaving(true);
     setError('');
     try {
-      const result = await withdrawGiftSponsored(account, giftBalance);
+      const result = await withdrawGiftSponsored(account, amount);
+      setActiveSheet(null);
       Alert.alert('Gift received', `${result.amount} AUSD was sent to your wallet.\n\n${result.transactionHash}`);
       await refresh();
     } catch (caught) {
@@ -236,6 +243,7 @@ export default function SavingsGoalsScreen() {
       }));
       setName('');
       setTarget('');
+      setShowCreate(false);
       const result = await createSponsoredSavingsPocket(account, pocketId, autoSaveBps);
       setPocketStates((current) => ({
         ...current,
@@ -289,6 +297,70 @@ export default function SavingsGoalsScreen() {
     }
   };
 
+  async function updateGoalRate() {
+    if (!account || !focusedGoal?.pocketId) return setError('Activate this goal before changing its auto-save rate.');
+    if (!/^\d+(\.\d{1,2})?$/.test(utilityAmount) || Number(utilityAmount) > 100) {
+      return setError('Enter a rate from 0% to 100%, with up to two decimal places.');
+    }
+    setSaving(true);
+    setError('');
+    try {
+      const bps = Math.round(Number(utilityAmount) * 100);
+      const result = await updateSavingsAutoSaveRateSponsored(account, focusedGoal.pocketId, bps);
+      const nextGoals = goals.map((goal) => goal.id === focusedGoal.id ? { ...goal, autoSaveBps: bps } : goal);
+      setGoals(nextGoals);
+      setPocketStates((current) => ({ ...current, [focusedGoal.id]: { ...current[focusedGoal.id], pocketId: focusedGoal.pocketId!, autoSaveBps: bps, exists: true } }));
+      try {
+        await saveSavingsGoals(account, nextGoals);
+      } catch {
+        setError('The rate changed on Monad, but the encrypted plan could not be updated. The on-chain rate will be used.');
+      }
+      setActiveGoal(null);
+      Alert.alert('Auto-save updated', `${Number(utilityAmount)}% will be saved from future payments.\n\n${result.transactionHash}`);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Could not update this goal’s auto-save rate.');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function withdrawFromGoal() {
+    if (!account || !focusedGoal?.pocketId) return setError('This goal does not have an active pocket.');
+    setSaving(true);
+    setError('');
+    try {
+      const result = await withdrawFromSavingsPocketSponsored(account, focusedGoal.pocketId, utilityAmount);
+      setPocketStates((current) => ({ ...current, [focusedGoal.id]: result.pocket }));
+      setActiveGoal(null);
+      Alert.alert('AUSD withdrawn', `${result.amount} AUSD was sent to your wallet.\n\n${result.transactionHash}`);
+      await refresh();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Could not withdraw from this savings pocket.');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function allocateReceivedGifts() {
+    if (!account) return setError('Unlock your Mera wallet before allocating gifts.');
+    const goal = goals.find((item) => item.id === selectedGiftGoal);
+    if (!goal?.pocketId || !pocketStates[goal.id]?.exists) return setError('Choose an active on-chain savings goal.');
+    setSaving(true);
+    setError('');
+    try {
+      const result = await allocateGiftToSavingsPocketSponsored(account, goal.pocketId, utilityAmount);
+      setPocketStates((current) => ({ ...current, [goal.id]: result.pocket }));
+      setGiftBalance(result.giftBalance);
+      setActiveSheet(null);
+      Alert.alert('Gift added to goal', `${result.amount} AUSD was added to ${goal.name}.\n\n${result.transactionHash}`);
+      await refresh();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Could not allocate this gift.');
+    } finally {
+      setSaving(false);
+    }
+  }
+
   const addSavings = async (goal: SavingsGoal) => {
     const amount = Number(contribution);
     if (!Number.isFinite(amount) || amount <= 0) return setError('Enter an amount greater than zero.');
@@ -325,7 +397,7 @@ export default function SavingsGoalsScreen() {
       const restored = await importSavingsVault(account, backupText.trim());
       setGoals(restored);
       setBackupText('');
-      setShowRestore(false);
+      setActiveSheet(null);
       Alert.alert('Plan restored', 'Your encrypted savings plan was opened with your Mera passkey.');
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Could not restore this encrypted backup.');
@@ -336,19 +408,22 @@ export default function SavingsGoalsScreen() {
 
   return (
     <Page contentStyle={styles.page}>
-      <Pressable onPress={() => router.back()} style={styles.back} accessibilityRole="button" accessibilityLabel="Go back">
-        <Feather name="arrow-left" size={20} color={colors.foreground} />
-        <Text style={[styles.backText, { color: colors.foreground }]}>Home</Text>
-      </Pressable>
-      <Eyebrow>PRIVATE SAVINGS PLAN</Eyebrow>
-      <Title>Save for what matters</Title>
-      <Text style={[styles.subtitle, { color: colors.mutedForeground }]}>Make a plan, set aside AUSD, and track your progress with your passkey.</Text>
+      <View style={styles.topBar}>
+        <View>
+          <Eyebrow>YOUR MONEY, SET ASIDE</Eyebrow>
+          <Title>Save for what matters</Title>
+        </View>
+        <Pressable onPress={() => router.back()} style={[styles.back, { backgroundColor: colors.secondary }]} accessibilityRole="button" accessibilityLabel="Go back">
+          <Feather name="arrow-left" size={18} color={colors.foreground} />
+        </Pressable>
+      </View>
+      <Text style={[styles.subtitle, { color: colors.mutedForeground }]}>AUSD goals, in one place.</Text>
 
       {!account ? (
         <InlineNotice icon="key">Savings plans are protected by Mera. Create or unlock a Mera passkey wallet to get started.</InlineNotice>
       ) : (
         <>
-          <Card style={styles.summary}>
+          <Card style={[styles.summary, { backgroundColor: colors.secondary, borderWidth: 0 }]}>
             <View style={styles.summaryTop}>
               <View style={[styles.summaryIcon, { backgroundColor: colors.secondary }]}><Feather name="target" size={19} color={colors.primary} /></View>
               <View style={{ flex: 1 }}>
@@ -356,69 +431,26 @@ export default function SavingsGoalsScreen() {
                 <Text style={[styles.summaryAmount, { color: colors.foreground }]}>{money(onChainTotal)} AUSD</Text>
               </View>
             </View>
-            <Divider />
-            <Text style={[styles.summaryMeta, { color: colors.mutedForeground }]}>
-              {balance === null ? 'Wallet balance loading…' : `${money(balance)} AUSD in your wallet`}
-              {localTrackedTotal > 0 ? ` · ${money(localTrackedTotal)} AUSD in older local-only tracking` : ''}
-            </Text>
-          </Card>
-
-          <InlineNotice icon="lock">Goal details are encrypted with a separate Mera PRF namespace. Deposits and payment auto-saves move Monad testnet AUSD into the deployed pocket contract; older goals without an on-chain pocket remain local tracking only.</InlineNotice>
-
-          {indexedSavings.length ? <Card style={styles.sharedCard}>
-            <View style={styles.sectionHeader}><View style={{ flex: 1 }}><Text style={[styles.createTitle, { color: colors.foreground }]}>Recent pocket activity</Text><Text style={[styles.summaryMeta, { color: colors.mutedForeground }]}>Confirmed SavingsPockets events from Monad.</Text></View><Feather name="activity" size={20} color={colors.primary} /></View>
-            {indexedSavings.slice(0, 3).map((item) => { const activity = formatIndexedSavings(item, account?.address ?? ''); return <View key={activity.id} style={styles.sharedRow}><View style={{ flex: 1 }}><Text style={[styles.goalName, { color: colors.foreground }]}>{activity.title}</Text><Text style={[styles.pocketMeta, { color: colors.mutedForeground }]}>{activity.amount > 0 ? `${money(activity.amount)} AUSD · ` : ''}{new Date(activity.createdAt).toLocaleDateString()}</Text></View><Feather name={activity.outgoing ? 'arrow-up-right' : 'arrow-down-left'} size={16} color={colors.foreground} /></View>; })}
-            <PrimaryButton label="View all activity" icon="arrow-right" secondary onPress={() => router.push('/(tabs)/activity')} />
-          </Card> : null}
-
-          <Card style={styles.sharedCard}>
-            <View style={styles.sectionHeader}>
-              <View style={{ flex: 1 }}>
-                <Text style={[styles.createTitle, { color: colors.foreground }]}>Shared pockets</Text>
-                <Text style={[styles.summaryMeta, { color: colors.mutedForeground }]}>Track a pocket someone shared with you, or fund it with a saved contact.</Text>
-              </View>
-              <Feather name="users" size={20} color={colors.primary} />
+            <View style={styles.summaryBottom}>
+              <Text style={[styles.summaryMeta, { color: colors.mutedForeground }]}>Wallet available</Text>
+              <Text style={[styles.walletAmount, { color: colors.foreground }]}>{balance === null ? '—' : `${money(balance)} AUSD`}</Text>
             </View>
-            {sharedPockets.map((shared) => {
-              const state = sharedPocketStates[shared.id];
-              return (
-                <View key={shared.id} style={styles.sharedRow}>
-                  <View style={{ flex: 1 }}>
-                    <Text style={[styles.goalName, { color: colors.foreground }]}>{shared.name}</Text>
-                    <Text style={[styles.pocketMeta, { color: colors.mutedForeground }]}>{state?.exists ? `${money(Number(state.balance))} AUSD` : 'Pocket unavailable'} · {shared.owner.slice(0, 8)}…</Text>
-                  </View>
-                  <Pressable onPress={() => void removeSharedPocket(shared.id)}><Text style={[styles.addText, { color: colors.destructive }]}>Remove</Text></Pressable>
-                </View>
-              );
-            })}
-            {showImport ? (
-              <>
-                <TextInput value={pocketCode} onChangeText={setPocketCode} placeholder="Paste shared pocket code" placeholderTextColor={colors.mutedForeground} autoCapitalize="none" autoCorrect={false} style={[styles.input, { color: colors.foreground, backgroundColor: colors.background, borderColor: colors.border }]} />
-                <PrimaryButton label="Track shared pocket" icon="eye" loading={saving} onPress={() => void importSharedPocket()} />
-              </>
-            ) : <PrimaryButton label="Track a shared pocket" icon="link" secondary onPress={() => setShowImport(true)} />}
           </Card>
 
-          <Card style={styles.sharedCard}>
-            <View style={styles.sectionHeader}>
-              <View style={{ flex: 1 }}>
-                <Text style={[styles.createTitle, { color: colors.foreground }]}>Gift AUSD</Text>
-                <Text style={[styles.summaryMeta, { color: colors.mutedForeground }]}>Use your private contact names to gift a person or fund their shared pocket.</Text>
-              </View>
-              <Feather name="gift" size={20} color={colors.primary} />
-            </View>
-            {giftBalance !== null && Number(giftBalance) > 0 ? <View style={styles.receivedGift}><Text style={[styles.pocketMeta, { color: colors.mutedForeground }]}>Received gifts waiting for you: {money(Number(giftBalance))} AUSD</Text><PrimaryButton label="Withdraw to wallet" icon="download" secondary loading={saving} onPress={() => void withdrawReceivedGifts()} /></View> : null}
-            {contacts.length === 0 ? <Text style={[styles.empty, { color: colors.mutedForeground }]}>Add a contact in Settings before sending a gift.</Text> : (
-              <>
-                <Text style={[styles.pocketMeta, { color: colors.mutedForeground }]}>Choose a contact</Text>
-                <View style={styles.choiceList}>{contacts.map((contact) => <Pressable key={contact.id} onPress={() => setGiftRecipient(contact.id)} style={[styles.choice, { borderColor: giftRecipient === contact.id ? colors.primary : colors.border, backgroundColor: giftRecipient === contact.id ? colors.secondary : colors.background }]}><Text style={[styles.addText, { color: colors.foreground }]}>{contact.name}</Text></Pressable>)}</View>
-                <TextInput value={giftAmount} onChangeText={setGiftAmount} placeholder="Amount in AUSD" placeholderTextColor={colors.mutedForeground} keyboardType="decimal-pad" style={[styles.input, { color: colors.foreground, backgroundColor: colors.background, borderColor: colors.border }]} />
-                <Text style={[styles.pocketMeta, { color: colors.mutedForeground }]}>Optional: choose a tracked pocket to fund directly.</Text>
-                <View style={styles.choiceList}><Pressable onPress={() => setGiftPocket('')} style={[styles.choice, { borderColor: !giftPocket ? colors.primary : colors.border, backgroundColor: !giftPocket ? colors.secondary : colors.background }]}><Text style={[styles.addText, { color: colors.foreground }]}>Gift person</Text></Pressable>{sharedPockets.map((shared) => <Pressable key={shared.id} onPress={() => setGiftPocket(shared.id)} style={[styles.choice, { borderColor: giftPocket === shared.id ? colors.primary : colors.border, backgroundColor: giftPocket === shared.id ? colors.secondary : colors.background }]}><Text style={[styles.addText, { color: colors.foreground }]}>Fund {shared.name}</Text></Pressable>)}</View>
-                <PrimaryButton label="Review and send gift" icon="lock" loading={saving} onPress={() => void sendGift()} />
-              </>
-            )}
-          </Card>
+          <View style={styles.actionRow}>
+            <ActionTile icon="plus" label="New goal" color={colors} onPress={() => { setError(''); setShowCreate(true); }} />
+            <ActionTile icon="gift" label="Gift" color={colors} onPress={() => { setError(''); setActiveSheet('gift'); }} />
+            <ActionTile icon="more-horizontal" label="More" color={colors} onPress={() => setActiveSheet('more')} />
+          </View>
+
+          {localTrackedTotal > 0 ? <Text style={[styles.localNote, { color: colors.mutedForeground }]}>{money(localTrackedTotal)} AUSD of older progress is tracked on this device.</Text> : null}
+          {giftBalance !== null && Number(giftBalance) > 0 ? (
+            <Pressable onPress={() => { setUtilityAmount(giftBalance); setActiveSheet('gifts'); }} style={[styles.giftBanner, { backgroundColor: colors.secondary }]}>
+              <View style={[styles.summaryIcon, { backgroundColor: colors.background }]}><Feather name="gift" size={18} color={colors.primary} /></View>
+              <View style={{ flex: 1 }}><Text style={[styles.goalName, { color: colors.foreground }]}>You received AUSD</Text><Text style={[styles.pocketMeta, { color: colors.mutedForeground }]}>Choose a goal or move it to your wallet</Text></View>
+              <Text style={[styles.giftAmount, { color: colors.primary }]}>{money(Number(giftBalance))}</Text>
+            </Pressable>
+          ) : null}
 
           {error ? <Text accessibilityRole="alert" style={[styles.error, { color: colors.destructive }]}>{error}</Text> : null}
           {loading ? <Text style={[styles.empty, { color: colors.mutedForeground }]}>Unlocking your private savings plan…</Text> : null}
@@ -427,7 +459,7 @@ export default function SavingsGoalsScreen() {
             const savedAmount = pocket?.exists ? Number(pocket.balance) : goal.saved;
             const progress = Math.min(1, savedAmount / goal.target);
             return (
-              <Card key={goal.id} style={styles.goalCard}>
+              <Card key={goal.id} style={[styles.goalCard, { backgroundColor: colors.secondary, borderWidth: 0 }]}>
                 <View style={styles.goalHeader}>
                   <View style={{ flex: 1 }}>
                     <Text style={[styles.goalName, { color: colors.foreground }]}>{goal.name}</Text>
@@ -446,42 +478,12 @@ export default function SavingsGoalsScreen() {
                     <Text style={[styles.pocketMeta, { color: colors.mutedForeground }]}>
                       On-chain pocket · {((goal.autoSaveBps ?? pocket.autoSaveBps) / 100).toFixed(2).replace(/\.?0+$/, '')}% auto-save
                     </Text>
-                    {activeGoal === goal.id ? (
-                      <>
-                        <Field label="Deposit AUSD into pocket" value={contribution} onChangeText={setContribution} placeholder="0.00" keyboardType="decimal-pad" />
-                        <PrimaryButton label="Deposit on Monad" icon="lock" loading={saving} onPress={() => void addSavings(goal)} />
-                        <Pressable onPress={() => setActiveGoal(null)} style={styles.cancelButton}>
-                          <Text style={[styles.addText, { color: colors.mutedForeground }]}>Cancel</Text>
-                        </Pressable>
-                      </>
-                    ) : (
-                      <>
-                        <View style={styles.pocketActions}>
-                          <Pressable style={styles.addButton} onPress={() => { setError(''); setContribution(''); setActiveGoal(goal.id); }}>
-                            <Feather name="plus" size={16} color={colors.primary} />
-                            <Text style={[styles.addText, { color: colors.primary }]}>Deposit AUSD</Text>
-                          </Pressable>
-                          <Pressable
-                            style={styles.addButton}
-                            onPress={() => router.push({
-                              pathname: '/(tabs)/send',
-                              params: {
-                                pocketId: goal.pocketId,
-                                autoSaveBps: String(goal.autoSaveBps ?? pocket.autoSaveBps),
-                                goalName: goal.name,
-                              },
-                            })}
-                          >
-                            <Feather name="arrow-up-right" size={16} color={colors.primary} />
-                            <Text style={[styles.addText, { color: colors.primary }]}>Pay + auto-save</Text>
-                          </Pressable>
-                          <Pressable style={styles.addButton} onPress={() => void sharePocket(goal)}>
-                            <Feather name="share-2" size={16} color={colors.primary} />
-                            <Text style={[styles.addText, { color: colors.primary }]}>Share pocket</Text>
-                          </Pressable>
-                        </View>
-                      </>
-                    )}
+                    <View style={styles.goalMetaRow}>
+                      <Text style={[styles.pocketMeta, { color: colors.mutedForeground }]}>{((pocket.autoSaveBps) / 100).toFixed(2).replace(/\.?0+$/, '')}% auto-save</Text>
+                      <Pressable style={[styles.manageButton, { backgroundColor: colors.background }]} onPress={() => { setError(''); setActiveGoal(goal.id); setGoalSheetMode('menu'); }}>
+                        <Text style={[styles.addText, { color: colors.primary }]}>Manage</Text><Feather name="chevron-right" size={15} color={colors.primary} />
+                      </Pressable>
+                    </View>
                   </View>
                 ) : (
                   <View style={styles.contribution}>
@@ -500,83 +502,172 @@ export default function SavingsGoalsScreen() {
             );
           })}
 
-          {!loading && (
-            <Card style={styles.createCard}>
-              <Text style={[styles.createTitle, { color: colors.foreground }]}>{goals.length ? 'Create another goal' : 'Create your first goal'}</Text>
-              <Field label="What are you saving for?" value={name} onChangeText={setName} placeholder="A new laptop" autoCapitalize="sentences" />
-              <Field label="Target amount · AUSD" value={target} onChangeText={setTarget} placeholder="500.00" keyboardType="decimal-pad" />
-                <Field label="Auto-save rate on payments · %" value={autoSaveRate} onChangeText={setAutoSaveRate} placeholder="10" keyboardType="decimal-pad" />
-                <Text style={[styles.pocketMeta, { color: colors.mutedForeground }]}>Creating a pocket is a sponsored Monad testnet transaction; it does not move AUSD. You’ll see the full payment, auto-save amount, and total debit before every auto-save payment.</Text>
-                <PrimaryButton label="Create pocket on Monad" icon="shield" loading={saving} onPress={() => void createGoal()} />
-            </Card>
-          )}
-          <Text style={[styles.privacy, { color: colors.mutedForeground }]}>Goal labels are encrypted on this device; pocket balances and transactions are read from Monad testnet. Your passkey can recreate the decryption key on another supported device.</Text>
-          <Card style={styles.backupCard}>
-            <Text style={[styles.createTitle, { color: colors.foreground }]}>Use your plan on another device</Text>
-            <Text style={[styles.summaryMeta, { color: colors.mutedForeground }]}>Share or copy this encrypted backup, then restore it on a device with the same passkey and app domain.</Text>
-            <PrimaryButton label="Share encrypted backup" icon="share" secondary onPress={() => void shareBackup()} />
-            <Pressable onPress={() => setShowRestore(!showRestore)} style={styles.restoreToggle}>
-              <Text style={[styles.addText, { color: colors.primary }]}>{showRestore ? 'Hide restore' : 'Restore from encrypted backup'}</Text>
-              <Feather name={showRestore ? 'chevron-up' : 'chevron-down'} size={16} color={colors.primary} />
-            </Pressable>
-            {showRestore ? <>
-              <TextInput
-                value={backupText}
-                onChangeText={setBackupText}
-                multiline
-                autoCapitalize="none"
-                autoCorrect={false}
-                placeholder="Paste encrypted backup JSON"
-                placeholderTextColor={colors.mutedForeground}
-                selectionColor={colors.primary}
-                style={[styles.backupInput, { color: colors.foreground, backgroundColor: colors.background, borderColor: colors.border }]}
-              />
-              <PrimaryButton label="Restore with passkey" icon="key" loading={saving} onPress={() => void restoreBackup()} />
-            </> : null}
-          </Card>
+          {!loading && goals.length > 0 ? <Pressable onPress={() => setShowCreate(true)} style={[styles.addGoalButton, { backgroundColor: colors.secondary }]}><Feather name="plus" size={17} color={colors.primary} /><Text style={[styles.addText, { color: colors.foreground }]}>Create another goal</Text></Pressable> : null}
+          <Text style={[styles.privacy, { color: colors.mutedForeground }]}>Pocket balances and transactions are read from Monad testnet. Your plan is protected by your passkey.</Text>
         </>
       )}
+      <Modal visible={showCreate || activeGoal !== null} transparent animationType="slide" statusBarTranslucent onRequestClose={() => { setShowCreate(false); setActiveGoal(null); }}>
+        <View style={styles.sheetBackdrop}>
+          <Pressable style={styles.sheetDismiss} onPress={() => { setShowCreate(false); setActiveGoal(null); }} accessibilityRole="button" accessibilityLabel="Close sheet" />
+          <View style={[styles.sheet, { backgroundColor: colors.background }]}>
+            <ScrollView showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled" contentContainerStyle={styles.sheetContent}>
+            <View style={[styles.sheetHandle, { backgroundColor: colors.border }]} />
+            <Text style={[styles.sheetTitle, { color: colors.foreground }]}>{activeGoal ? (goalSheetMode === 'menu' ? focusedGoal?.name ?? 'Manage goal' : goalSheetMode === 'deposit' ? 'Add to your goal' : goalSheetMode === 'rate' ? 'Auto-save rate' : 'Withdraw AUSD') : 'Create a savings goal'}</Text>
+            <Text style={[styles.sheetHint, { color: colors.mutedForeground }]}>{activeGoal ? (goalSheetMode === 'menu' ? 'Manage this goal and its AUSD pocket.' : goalSheetMode === 'deposit' ? 'Move AUSD from your wallet into this pocket.' : goalSheetMode === 'rate' ? 'Choose the share of each payment to save.' : `Available in pocket: ${focusedGoal ? money(Number(pocketStates[focusedGoal.id]?.balance ?? 0)) : '0.00'} AUSD`) : 'Set a target and choose how payments can grow it.'}</Text>
+            {activeGoal && goalSheetMode === 'menu' ? <View style={styles.sheetActions}>
+              <SheetAction icon="plus" title="Deposit AUSD" detail="Move AUSD into this goal" color={colors} onPress={() => { setContribution(''); setGoalSheetMode('deposit'); }} />
+              <SheetAction icon="arrow-up-right" title="Pay + auto-save" detail="Send AUSD and save a percentage" color={colors} onPress={() => { if (!focusedGoal?.pocketId) return; setActiveGoal(null); router.push({ pathname: '/(tabs)/send', params: { pocketId: focusedGoal.pocketId, autoSaveBps: String(pocketStates[focusedGoal.id]?.autoSaveBps ?? focusedGoal.autoSaveBps ?? 0), goalName: focusedGoal.name } }); }} />
+              <SheetAction icon="percent" title="Change auto-save" detail={`${((pocketStates[focusedGoal?.id ?? '']?.autoSaveBps ?? focusedGoal?.autoSaveBps ?? 0) / 100).toFixed(2).replace(/\.?0+$/, '')}% currently`} color={colors} onPress={() => { setUtilityAmount(String((pocketStates[focusedGoal?.id ?? '']?.autoSaveBps ?? focusedGoal?.autoSaveBps ?? 0) / 100)); setGoalSheetMode('rate'); }} />
+              <SheetAction icon="download" title="Withdraw" detail="Send pocket AUSD back to your wallet" color={colors} onPress={() => { setUtilityAmount(''); setGoalSheetMode('withdraw'); }} />
+              <SheetAction icon="share-2" title="Share pocket" detail="Let someone track or fund this goal" color={colors} onPress={() => { if (focusedGoal) void sharePocket(focusedGoal); setActiveGoal(null); }} />
+            </View> : null}
+            {activeGoal && goalSheetMode === 'deposit' ? <>
+              <Field label="Amount · AUSD" value={contribution} onChangeText={setContribution} placeholder="0.00" keyboardType="decimal-pad" />
+              <PrimaryButton label="Deposit AUSD" icon="lock" loading={saving} onPress={() => { const goal = goals.find((item) => item.id === activeGoal); if (goal) void addSavings(goal); }} />
+            </> : null}
+            {activeGoal && goalSheetMode === 'rate' ? <>
+              <Field label="Auto-save rate · %" value={utilityAmount} onChangeText={setUtilityAmount} placeholder="10" keyboardType="decimal-pad" />
+              <Text style={[styles.sheetHint, { color: colors.mutedForeground }]}>On a 100 AUSD payment, {(Number.isFinite(Number(utilityAmount)) ? Number(utilityAmount) : 0).toLocaleString('en-US', { maximumFractionDigits: 2 })} AUSD would go to this goal.</Text>
+              <PrimaryButton label="Update rate" icon="percent" loading={saving} onPress={() => void updateGoalRate()} />
+            </> : null}
+            {activeGoal && goalSheetMode === 'withdraw' ? <>
+              <View style={styles.amountRow}><View style={styles.amountField}><Field label="Amount · AUSD" value={utilityAmount} onChangeText={setUtilityAmount} placeholder="0.00" keyboardType="decimal-pad" /></View><Pressable onPress={() => setUtilityAmount(String(pocketStates[focusedGoal?.id ?? '']?.balance ?? '0'))} style={[styles.maxButton, { backgroundColor: colors.secondary }]}><Text style={[styles.addText, { color: colors.primary }]}>Max</Text></Pressable></View>
+              <PrimaryButton label="Review withdrawal" icon="download" loading={saving} onPress={() => Alert.alert('Review withdrawal', `${utilityAmount || '0.00'} AUSD will be sent to your wallet:\n${account?.address ?? ''}`, [{ text: 'Cancel', style: 'cancel' }, { text: 'Confirm with passkey', onPress: () => void withdrawFromGoal() }])} />
+            </> : null}
+            {!activeGoal ? <>
+              <Field label="Goal name" value={name} onChangeText={setName} placeholder="A new laptop" autoCapitalize="sentences" />
+              <Field label="Target · AUSD" value={target} onChangeText={setTarget} placeholder="500.00" keyboardType="decimal-pad" />
+              <Field label="Auto-save rate · %" value={autoSaveRate} onChangeText={setAutoSaveRate} placeholder="10" keyboardType="decimal-pad" />
+              <PrimaryButton label="Create goal" icon="shield" loading={saving} onPress={() => void createGoal()} />
+            </> : null}
+            {error ? <Text accessibilityRole="alert" style={[styles.error, { color: colors.destructive }]}>{error}</Text> : null}
+            <Pressable onPress={() => { setShowCreate(false); setActiveGoal(null); }} style={styles.sheetCancel}><Text style={[styles.addText, { color: colors.mutedForeground }]}>Cancel</Text></Pressable>
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
+      <Modal visible={activeSheet !== null} transparent animationType="slide" statusBarTranslucent onRequestClose={() => setActiveSheet(null)}>
+        <View style={styles.sheetBackdrop}>
+          <Pressable style={styles.sheetDismiss} onPress={() => setActiveSheet(null)} accessibilityRole="button" accessibilityLabel="Close sheet" />
+          <View style={[styles.sheet, { backgroundColor: colors.background }]}>
+            <ScrollView showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled" contentContainerStyle={styles.sheetContent}>
+            <View style={[styles.sheetHandle, { backgroundColor: colors.border }]} />
+            <Text style={[styles.sheetTitle, { color: colors.foreground }]}>{activeSheet === 'gift' ? 'Send an AUSD gift' : activeSheet === 'shared' ? 'Track a shared pocket' : activeSheet === 'restore' ? 'Restore your plan' : activeSheet === 'gifts' ? 'Received AUSD' : activeSheet === 'allocate' ? 'Add gifts to a goal' : 'More savings tools'}</Text>
+            <Text style={[styles.sheetHint, { color: colors.mutedForeground }]}>{activeSheet === 'gift' ? 'Choose a private contact, then send from your wallet.' : activeSheet === 'shared' ? 'Paste a pocket code to follow or fund someone’s goal.' : activeSheet === 'restore' ? 'Use an encrypted backup made with this passkey.' : activeSheet === 'gifts' ? `${giftBalance ? money(Number(giftBalance)) : '0.00'} AUSD is ready to use.` : activeSheet === 'allocate' ? 'Choose an active goal and the amount to move into it.' : 'Backup, shared pockets, and activity.'}</Text>
+            {activeSheet === 'gift' ? <>
+              {contacts.length ? <View style={styles.choiceList}>{contacts.map((contact) => <Pressable key={contact.id} onPress={() => setGiftRecipient(contact.id)} style={[styles.choice, { borderWidth: 0, backgroundColor: giftRecipient === contact.id ? colors.primary : colors.secondary }]}><Text style={[styles.addText, { color: giftRecipient === contact.id ? colors.primaryForeground : colors.foreground }]}>{contact.name}</Text></Pressable>)}</View> : <Text style={[styles.empty, { color: colors.mutedForeground }]}>Add a contact in Settings to send a gift.</Text>}
+              <TextInput value={giftAmount} onChangeText={setGiftAmount} placeholder="Amount in AUSD" placeholderTextColor={colors.mutedForeground} keyboardType="decimal-pad" style={[styles.input, { color: colors.foreground, backgroundColor: colors.secondary, borderWidth: 0 }]} />
+              {sharedPockets.length ? <View style={styles.choiceList}><Pressable onPress={() => setGiftPocket('')} style={[styles.choice, { borderWidth: 0, backgroundColor: !giftPocket ? colors.primary : colors.secondary }]}><Text style={[styles.addText, { color: !giftPocket ? colors.primaryForeground : colors.foreground }]}>Gift person</Text></Pressable>{sharedPockets.map((item) => <Pressable key={item.id} onPress={() => setGiftPocket(item.id)} style={[styles.choice, { borderWidth: 0, backgroundColor: giftPocket === item.id ? colors.primary : colors.secondary }]}><Text style={[styles.addText, { color: giftPocket === item.id ? colors.primaryForeground : colors.foreground }]}>{item.name}</Text></Pressable>)}</View> : null}
+              <PrimaryButton label="Review and send" icon="lock" loading={saving} onPress={() => void sendGift()} />
+            </> : activeSheet === 'shared' ? <>
+              <TextInput value={pocketCode} onChangeText={setPocketCode} placeholder="Shared pocket code" placeholderTextColor={colors.mutedForeground} autoCapitalize="none" autoCorrect={false} style={[styles.input, { color: colors.foreground, backgroundColor: colors.secondary, borderWidth: 0 }]} />
+              <PrimaryButton label="Track pocket" icon="link" loading={saving} onPress={() => void importSharedPocket()} />
+            </> : activeSheet === 'gifts' ? <>
+              {goals.some((goal) => Boolean(goal.pocketId && pocketStates[goal.id]?.exists)) ? <PrimaryButton label="Allocate to a goal" icon="target" secondary onPress={() => { setSelectedGiftGoal(goals.find((goal) => goal.pocketId && pocketStates[goal.id]?.exists)?.id ?? ''); setUtilityAmount(giftBalance ?? ''); setActiveSheet('allocate'); }} /> : <Text style={[styles.empty, { color: colors.mutedForeground }]}>Create and activate a savings goal to allocate gifts, or withdraw them below.</Text>}
+              <View style={styles.amountRow}><View style={styles.amountField}><Field label="Withdraw amount · AUSD" value={utilityAmount} onChangeText={setUtilityAmount} placeholder="0.00" keyboardType="decimal-pad" /></View><Pressable onPress={() => setUtilityAmount(giftBalance ?? '0')} style={[styles.maxButton, { backgroundColor: colors.secondary }]}><Text style={[styles.addText, { color: colors.primary }]}>Max</Text></Pressable></View>
+              <PrimaryButton label="Review withdrawal" icon="download" loading={saving} onPress={() => Alert.alert('Review gift withdrawal', `${utilityAmount || '0.00'} AUSD will be sent to your wallet:\n${account?.address ?? ''}`, [{ text: 'Cancel', style: 'cancel' }, { text: 'Confirm with passkey', onPress: () => void withdrawReceivedGifts(utilityAmount) }])} />
+            </> : activeSheet === 'allocate' ? <>
+              {goals.filter((goal) => goal.pocketId && pocketStates[goal.id]?.exists).length ? <View style={styles.choiceList}>{goals.filter((goal) => goal.pocketId && pocketStates[goal.id]?.exists).map((goal) => <Pressable key={goal.id} onPress={() => setSelectedGiftGoal(goal.id)} style={[styles.choice, { backgroundColor: selectedGiftGoal === goal.id ? colors.primary : colors.secondary }]}><Text style={[styles.addText, { color: selectedGiftGoal === goal.id ? colors.primaryForeground : colors.foreground }]}>{goal.name}</Text></Pressable>)}</View> : <Text style={[styles.empty, { color: colors.mutedForeground }]}>No active goal pockets are available. Activate a goal first.</Text>}
+              <View style={styles.amountRow}><View style={styles.amountField}><Field label="Amount · AUSD" value={utilityAmount} onChangeText={setUtilityAmount} placeholder="0.00" keyboardType="decimal-pad" /></View><Pressable onPress={() => setUtilityAmount(giftBalance ?? '0')} style={[styles.maxButton, { backgroundColor: colors.secondary }]}><Text style={[styles.addText, { color: colors.primary }]}>Max</Text></Pressable></View>
+              <PrimaryButton label="Review allocation" icon="target" loading={saving} disabled={!goals.some((goal) => goal.id === selectedGiftGoal && goal.pocketId && pocketStates[goal.id]?.exists)} onPress={() => { const goal = goals.find((item) => item.id === selectedGiftGoal); Alert.alert('Review gift allocation', `${utilityAmount || '0.00'} AUSD will be added to ${goal?.name ?? 'your goal'}.`, [{ text: 'Cancel', style: 'cancel' }, { text: 'Confirm with passkey', onPress: () => void allocateReceivedGifts() }]); }} />
+            </> : activeSheet === 'restore' ? <>
+              <TextInput value={backupText} onChangeText={setBackupText} multiline autoCapitalize="none" autoCorrect={false} placeholder="Paste encrypted backup JSON" placeholderTextColor={colors.mutedForeground} selectionColor={colors.primary} style={[styles.backupInput, { color: colors.foreground, backgroundColor: colors.secondary, borderWidth: 0 }]} />
+              <PrimaryButton label="Restore with passkey" icon="key" loading={saving} onPress={() => void restoreBackup()} />
+            </> : <>
+              <PrimaryButton label="Track shared pocket" icon="users" secondary onPress={() => setActiveSheet('shared')} />
+              <PrimaryButton label="Share encrypted backup" icon="share" secondary onPress={() => { setActiveSheet(null); void shareBackup(); }} />
+              <PrimaryButton label="Restore from backup" icon="key" secondary onPress={() => setActiveSheet('restore')} />
+              {sharedPockets.map((shared) => <View key={shared.id} style={styles.sharedUtilityRow}><View style={{ flex: 1 }}><Text style={[styles.goalName, { color: colors.foreground }]}>{shared.name}</Text><Text style={[styles.pocketMeta, { color: colors.mutedForeground }]}>{sharedPocketStates[shared.id]?.exists ? `${money(Number(sharedPocketStates[shared.id].balance))} AUSD` : 'Pocket unavailable'}</Text></View><Pressable onPress={() => void removeSharedPocket(shared.id)}><Text style={[styles.addText, { color: colors.destructive }]}>Remove</Text></Pressable></View>)}
+              <PrimaryButton label="View savings activity" icon="activity" secondary onPress={() => { setActiveSheet(null); router.push('/(tabs)/activity'); }} />
+            </>}
+            {error ? <Text accessibilityRole="alert" style={[styles.error, { color: colors.destructive }]}>{error}</Text> : null}
+            <Pressable onPress={() => setActiveSheet(null)} style={styles.sheetCancel}><Text style={[styles.addText, { color: colors.mutedForeground }]}>Close</Text></Pressable>
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
     </Page>
   );
 }
 
 const styles = StyleSheet.create({
   page: { gap: 14, paddingBottom: 38 },
-  back: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 5 },
-  backText: { fontSize: 14, fontFamily: 'Inter_600SemiBold' },
-  subtitle: { fontSize: 14, lineHeight: 21, marginTop: -7, marginBottom: 4 },
-  summary: { gap: 12 },
+  topBar: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: -5 },
+  back: { width: 40, height: 40, borderRadius: 14, alignItems: 'center', justifyContent: 'center' },
+  subtitle: { fontSize: 13, lineHeight: 19, marginTop: -7, marginBottom: 4 },
+  summary: { gap: 14, padding: 18, borderRadius: 20 },
   summaryTop: { flexDirection: 'row', alignItems: 'center', gap: 12 },
   summaryIcon: { width: 44, height: 44, borderRadius: 15, alignItems: 'center', justifyContent: 'center' },
   summaryLabel: { fontSize: 10, letterSpacing: 0.7, fontFamily: 'Inter_600SemiBold' },
-  summaryAmount: { fontSize: 22, fontFamily: 'Inter_700Bold', marginTop: 2 },
-  summaryMeta: { fontSize: 12 },
+  summaryAmount: { fontSize: 24, fontFamily: 'Inter_700Bold', marginTop: 2 },
+  summaryMeta: { fontSize: 11 },
+  summaryBottom: { paddingTop: 11, borderTopWidth: 1, borderTopColor: 'rgba(90,95,105,0.12)', flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  walletAmount: { fontSize: 12, fontFamily: 'Inter_600SemiBold' },
+  actionRow: { flexDirection: 'row', gap: 9 },
+  actionTile: { flex: 1, minHeight: 72, alignItems: 'center', justifyContent: 'center', gap: 7, borderRadius: 16 },
+  actionLabel: { fontSize: 10, fontFamily: 'Inter_600SemiBold' },
+  localNote: { fontSize: 11, lineHeight: 16, paddingHorizontal: 3 },
+  giftBanner: { flexDirection: 'row', alignItems: 'center', gap: 11, padding: 14, borderRadius: 18 },
+  giftAmount: { fontSize: 13, fontFamily: 'Inter_700Bold' },
   sharedCard: { gap: 13, padding: 16 },
-  sharedRow: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 8, borderBottomWidth: StyleSheet.hairlineWidth },
+  sharedRow: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 8 },
   sectionHeader: { flexDirection: 'row', alignItems: 'center', gap: 10 },
   choiceList: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
-  choice: { borderWidth: 1, borderRadius: 10, paddingHorizontal: 11, paddingVertical: 9 },
+  choice: { borderRadius: 12, paddingHorizontal: 12, paddingVertical: 10 },
   receivedGift: { gap: 10 },
-  input: { minHeight: 46, borderWidth: 1, borderRadius: 12, paddingHorizontal: 12, fontSize: 14 },
-  goalCard: { gap: 13 },
+  input: { minHeight: 48, borderRadius: 14, paddingHorizontal: 14, fontSize: 14 },
+  goalCard: { gap: 13, padding: 17, borderRadius: 20 },
   goalHeader: { flexDirection: 'row', alignItems: 'center', gap: 12 },
   goalName: { fontSize: 16, fontFamily: 'Inter_600SemiBold' },
   goalTarget: { fontSize: 12, marginTop: 4 },
   percent: { fontSize: 16, fontFamily: 'Inter_700Bold' },
+  goalMetaRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  manageButton: { minHeight: 34, flexDirection: 'row', alignItems: 'center', gap: 5, borderRadius: 11, paddingHorizontal: 10 },
   track: { height: 8, borderRadius: 8, overflow: 'hidden' },
   fill: { height: '100%', borderRadius: 8 },
   addButton: { alignSelf: 'flex-start', minHeight: 36, flexDirection: 'row', alignItems: 'center', gap: 6 },
+  actionChip: { minHeight: 36, flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 11, borderRadius: 12 },
   addText: { fontSize: 13, fontFamily: 'Inter_600SemiBold' },
   contribution: { gap: 11 },
   pocketMeta: { fontSize: 11, lineHeight: 17, fontFamily: 'Inter_400Regular' },
   pocketActions: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between', gap: 8 },
-  cancelButton: { alignSelf: 'center', paddingVertical: 7 },
-  createCard: { gap: 14 },
-  backupCard: { gap: 12 },
-  restoreToggle: { minHeight: 34, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  sheetActions: { gap: 8 },
+  sheetAction: { minHeight: 58, flexDirection: 'row', alignItems: 'center', gap: 12, paddingHorizontal: 12, borderRadius: 14 },
+  sheetActionIcon: { width: 34, height: 34, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
+  sheetActionTitle: { fontSize: 13, fontFamily: 'Inter_600SemiBold' },
+  sheetActionDetail: { fontSize: 11, marginTop: 2 },
+  amountRow: { flexDirection: 'row', alignItems: 'flex-end', gap: 8 },
+  amountField: { flex: 1 },
+  maxButton: { marginBottom: 5, minHeight: 43, justifyContent: 'center', paddingHorizontal: 12, borderRadius: 13 },
+  sharedUtilityRow: { minHeight: 48, flexDirection: 'row', alignItems: 'center', gap: 12 },
   backupInput: { minHeight: 104, borderWidth: 1, borderRadius: 12, padding: 12, fontSize: 12, textAlignVertical: 'top' },
   createTitle: { fontSize: 17, fontFamily: 'Inter_600SemiBold', marginBottom: 2 },
   empty: { fontSize: 13, paddingVertical: 12 },
   error: { fontSize: 13, lineHeight: 19 },
   privacy: { textAlign: 'center', fontSize: 11, lineHeight: 17, paddingHorizontal: 10 },
+  addGoalButton: { minHeight: 48, borderRadius: 15, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8 },
+  sheetBackdrop: { flex: 1, justifyContent: 'flex-end', backgroundColor: 'rgba(12,15,20,0.42)' },
+  sheetDismiss: { position: 'absolute', top: 0, right: 0, bottom: 0, left: 0 },
+  sheet: { borderTopLeftRadius: 26, borderTopRightRadius: 26, maxHeight: '88%', padding: 0 },
+  sheetContent: { paddingHorizontal: 22, paddingTop: 12, paddingBottom: 34, gap: 14 },
+  sheetHandle: { width: 38, height: 4, borderRadius: 4, alignSelf: 'center', marginBottom: 3 },
+  sheetTitle: { fontSize: 22, fontFamily: 'Inter_700Bold' },
+  sheetHint: { fontSize: 12, lineHeight: 18, marginTop: -9 },
+  sheetCancel: { minHeight: 36, alignItems: 'center', justifyContent: 'center' },
 });
+
+type Palette = ReturnType<typeof useColors>;
+function ActionTile({ icon, label, color, onPress }: { icon: React.ComponentProps<typeof Feather>['name']; label: string; color: Palette; onPress: () => void }) {
+  return <Pressable onPress={onPress} style={({ pressed }) => [styles.actionTile, { backgroundColor: color.secondary, opacity: pressed ? 0.75 : 1 }]}>
+    <Feather name={icon} size={18} color={color.primary} />
+    <Text style={[styles.actionLabel, { color: color.foreground }]}>{label}</Text>
+  </Pressable>;
+}
+
+function SheetAction({ icon, title, detail, color, onPress }: { icon: React.ComponentProps<typeof Feather>['name']; title: string; detail: string; color: Palette; onPress: () => void }) {
+  return <Pressable onPress={onPress} style={({ pressed }) => [styles.sheetAction, { backgroundColor: color.secondary, opacity: pressed ? 0.72 : 1 }]}>
+    <View style={[styles.sheetActionIcon, { backgroundColor: color.background }]}><Feather name={icon} size={16} color={color.primary} /></View>
+    <View style={{ flex: 1 }}><Text style={[styles.sheetActionTitle, { color: color.foreground }]}>{title}</Text><Text style={[styles.sheetActionDetail, { color: color.mutedForeground }]}>{detail}</Text></View>
+    <Feather name="chevron-right" size={16} color={color.mutedForeground} />
+  </Pressable>;
+}

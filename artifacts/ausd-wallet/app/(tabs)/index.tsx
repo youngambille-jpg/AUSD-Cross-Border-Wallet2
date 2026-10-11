@@ -146,7 +146,7 @@ export default function WalletHome() {
       <View style={styles.quickActions}>
         <QuickAction
           icon="download"
-          label="Deposit"
+          label="Receive"
           onPress={() => { setDrawerOffset(0); setOpenAction('deposit'); }}
         />
         <QuickAction
@@ -177,10 +177,10 @@ export default function WalletHome() {
             </View>
             <View style={styles.drawerHeading}>
               <View>
-                <Eyebrow>{openAction === 'deposit' ? 'MONEY IN' : 'MONAD TESTNET'}</Eyebrow>
-                <Text style={[styles.drawerTitle, { color: colors.foreground }]}>{openAction === 'deposit' ? 'Add money' : 'Swap tokens'}</Text>
+                <Eyebrow>{openAction === 'deposit' ? 'RECEIVE' : 'MONAD TESTNET'}</Eyebrow>
+                <Text style={[styles.drawerTitle, { color: colors.foreground }]}>{openAction === 'deposit' ? 'Receive money' : 'Swap tokens'}</Text>
                 <Text style={[styles.drawerSubtitle, { color: colors.mutedForeground }]}>
-                  {openAction === 'deposit' ? 'Get AUSD into your wallet.' : 'Swap AUSD to CTK on Monad testnet.'}
+                  {openAction === 'deposit' ? 'Share your Monad wallet address or bridge funds from another network.' : 'Swap AUSD to CTK on Monad testnet.'}
                 </Text>
               </View>
               <Pressable accessibilityRole="button" accessibilityLabel="Close action drawer" onPress={() => setOpenAction(null)} style={[styles.drawerClose, { backgroundColor: colors.secondary }]}>
@@ -192,7 +192,7 @@ export default function WalletHome() {
                 <>
                   <View style={[styles.swapNotice, { backgroundColor: colors.secondary }]}>
                     <Feather name="info" size={16} color={colors.primary} />
-                    <Text style={[styles.actionMethodCopy, { color: colors.mutedForeground, flex: 1 }]}>Choose a direct Monad deposit address or bridge from another supported network with Aurora Intents.</Text>
+                    <Text style={[styles.actionMethodCopy, { color: colors.mutedForeground, flex: 1 }]}>Receive directly to your Monad address, or bridge from another supported network with Aurora Intents.</Text>
                   </View>
                   <PrimaryButton label="Receive to wallet address" icon="copy" onPress={() => { setOpenAction(null); router.push('/receive'); }} />
                   <PrimaryButton label="Deposit with Aurora Intents" icon="repeat" secondary onPress={() => { setOpenAction(null); router.push('/aurora-deposit'); }} />

@@ -10,13 +10,13 @@ import {
   InlineNotice,
   Page,
   PrimaryButton,
-  Title,
 } from '@/components/Primitives';
 
 export default function SimulationSuccessScreen() {
   const colors = useColors();
   const params = useLocalSearchParams<{
     recipient?: string;
+    recipientName?: string;
     amount?: string;
     currency?: string;
     receiveAmount?: string;
@@ -34,6 +34,7 @@ export default function SimulationSuccessScreen() {
     historyWarning?: string;
   }>();
   const amount = Number(params.amount ?? 0);
+  const currency = typeof params.currency === 'string' ? params.currency : 'AUSD';
   const receiveAmount = Number(params.receiveAmount ?? amount);
   const receiveCurrency = typeof params.receiveCurrency === 'string' ? params.receiveCurrency : 'AUSD';
   const settledThroughAgora = params.settlement === 'agora';
@@ -52,18 +53,19 @@ export default function SimulationSuccessScreen() {
         <View style={[styles.confirmedDot, { backgroundColor: colors.primary }]} />
         <Text style={[styles.confirmedText, { color: colors.foreground }]}>CONFIRMED ON MONAD TESTNET</Text>
       </View>
-      <Title>{autoSaveConfirmed ? 'Payment + savings confirmed' : settledThroughAgora ? 'Settlement confirmed' : 'Transfer confirmed'}</Title>
+      <Text style={[styles.title, { color: colors.foreground }]}>{autoSaveConfirmed ? 'Payment + savings confirmed' : settledThroughAgora ? 'Settlement confirmed' : 'Transfer sent'}</Text>
       <Text style={[styles.subtitle, { color: colors.mutedForeground }]}>
         {autoSaveConfirmed
-          ? 'The recipient payment and savings allocation were included in one confirmed Monad testnet transaction.'
+          ? 'Your payment and savings allocation are confirmed on Monad.'
           : settledThroughAgora
-          ? 'The Agora AUSD-to-CTK swap was included in a confirmed sponsored transaction.'
-          : 'Your AUSD transfer was included in a confirmed sponsored transaction.'}
+          ? 'Your Agora testnet settlement is confirmed on Monad.'
+          : `Sent to ${params.recipientName || params.recipient || 'recipient'}.`}
       </Text>
 
       <Card style={styles.receipt}>
+        <Text style={[styles.amountLabel, { color: colors.mutedForeground }]}>YOU SENT</Text>
         <Text style={[styles.amount, { color: colors.foreground }]}>
-          {amount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 6 })} AUSD
+          {amount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 6 })} {currency}
         </Text>
         <View style={[styles.receivePanel, { backgroundColor: colors.secondary }]}>
           <Text style={[styles.receivesLabel, { color: colors.mutedForeground }]}>{settledThroughAgora ? 'TESTNET OUTPUT · AGORA QUOTE' : 'RECIPIENT RECEIVES'}</Text>
@@ -87,8 +89,7 @@ export default function SimulationSuccessScreen() {
         <View style={[styles.receiptDivider, { backgroundColor: colors.border }]} />
         <Text style={[styles.fieldLabel, { color: colors.mutedForeground }]}>RECIPIENT</Text>
         <Text selectable style={[styles.to, { color: colors.foreground }]}>{params.recipient ?? 'Recipient unavailable'}</Text>
-        {params.accountAddress ? <Text selectable style={[styles.reference, { color: colors.mutedForeground }]}>From smart account · {params.accountAddress}</Text> : null}
-        {params.blockNumber ? <Text style={[styles.reference, { color: colors.mutedForeground }]}>Block {params.blockNumber} · Gas sponsored by Pimlico</Text> : null}
+        {params.blockNumber ? <Text style={[styles.reference, { color: colors.mutedForeground }]}>Block {params.blockNumber} · Sponsored gas</Text> : null}
         {transactionHash ? (
           <View style={styles.transactionRef}>
             <Text style={[styles.fieldLabel, { color: colors.mutedForeground }]}>TRANSACTION HASH</Text>
@@ -113,7 +114,7 @@ export default function SimulationSuccessScreen() {
           ? 'Both transfers were performed atomically by the SavingsPockets contract. Testnet AUSD moved; this has no real-world monetary value.'
           : settledThroughAgora
           ? 'CTK is a testnet mock payout token. This confirms the on-chain swap only; it is not a fiat payout. Receipt saved to Activity on this device.'
-          : 'Testnet transaction only. Receipt saved to Activity on this device.'}
+          : 'Saved to Activity. This is a Monad testnet transaction.'}
       </InlineNotice>
       <PrimaryButton
         label="Back to wallet"
@@ -137,8 +138,10 @@ const styles = StyleSheet.create({
   confirmedBadge: { flexDirection: 'row', alignSelf: 'flex-start', alignItems: 'center', gap: 7, borderRadius: 8, paddingHorizontal: 10, paddingVertical: 7 },
   confirmedDot: { width: 7, height: 7, borderRadius: 4 },
   confirmedText: { fontSize: 9, letterSpacing: 0.65, fontFamily: 'Inter_700Bold' },
+  title: { fontSize: 25, lineHeight: 31, letterSpacing: -0.6, fontFamily: 'Inter_600SemiBold' },
   subtitle: { fontSize: 13, lineHeight: 20, fontFamily: 'Inter_400Regular' },
   receipt: { gap: 9, padding: 16 },
+  amountLabel: { fontSize: 9, letterSpacing: 0.8, fontFamily: 'Inter_600SemiBold' },
   amount: { fontSize: 22, fontFamily: 'Inter_600SemiBold' },
   fieldLabel: { fontSize: 9, letterSpacing: 0.75, fontFamily: 'Inter_600SemiBold' },
   to: { fontSize: 11, lineHeight: 17, fontFamily: 'Inter_500Medium' },

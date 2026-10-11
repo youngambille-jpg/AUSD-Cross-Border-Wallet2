@@ -147,6 +147,7 @@ export default function ReviewScreen() {
         pathname: '/success',
         params: {
           recipient: transfer.recipient,
+          recipientName,
           amount: autoSaveResult?.paymentAmount ?? String(sentAmount),
           currency: sentCurrency,
           receiveAmount: String(receivedAmount),

@@ -108,6 +108,27 @@ const pocketsAbi = [
   },
   {
     type: 'function',
+    name: 'withdraw',
+    stateMutability: 'nonpayable',
+    inputs: [
+      { name: 'pocketId', type: 'bytes32' },
+      { name: 'amount', type: 'uint256' },
+      { name: 'recipient', type: 'address' },
+    ],
+    outputs: [],
+  },
+  {
+    type: 'function',
+    name: 'setAutoSaveRate',
+    stateMutability: 'nonpayable',
+    inputs: [
+      { name: 'pocketId', type: 'bytes32' },
+      { name: 'autoSaveBps', type: 'uint16' },
+    ],
+    outputs: [],
+  },
+  {
+    type: 'function',
     name: 'payWithAutoSave',
     stateMutability: 'nonpayable',
     inputs: [
@@ -361,6 +382,62 @@ export async function depositToSavingsPocket(
   };
 }
 
+export async function withdrawFromSavingsPocketSponsored(
+  account: MeraPasskeyProfile,
+  pocketId: string,
+  amount: string,
+) {
+  assertPocketId(pocketId);
+  let amountRaw: bigint;
+  try {
+    amountRaw = parseUnits(amount, 6);
+  } catch {
+    throw new Error('Enter a valid AUSD withdrawal with at most six decimal places.');
+  }
+  if (amountRaw <= 0n) throw new Error('Enter an AUSD withdrawal greater than zero.');
+  await assertSavingsContract();
+  const pocket = await getSavingsPocket(account.address, pocketId);
+  if (!pocket.exists) throw new Error('This savings pocket is not active on Monad.');
+  const balance = parseUnits(pocket.balance, 6);
+  if (balance < amountRaw) throw new Error(`This pocket has ${pocket.balance} AUSD available.`);
+  const result = await sendSponsoredCalls(account, [{
+    to: SAVINGS_POCKETS_ADDRESS,
+    data: encodeFunctionData({
+      abi: pocketsAbi,
+      functionName: 'withdraw',
+      args: [pocketId, amountRaw, account.address as Address],
+    }),
+  }]);
+  return {
+    ...result,
+    amount: formatUnits(amountRaw, 6),
+    pocket: { ...pocket, balance: formatUnits(balance - amountRaw, 6) },
+  };
+}
+
+export async function updateSavingsAutoSaveRateSponsored(
+  account: MeraPasskeyProfile,
+  pocketId: string,
+  autoSaveBps: number,
+) {
+  assertPocketId(pocketId);
+  if (!Number.isInteger(autoSaveBps) || autoSaveBps < 0 || autoSaveBps > 10_000) {
+    throw new Error('Choose an auto-save rate from 0% to 100%.');
+  }
+  await assertSavingsContract();
+  const pocket = await getSavingsPocket(account.address, pocketId);
+  if (!pocket.exists) throw new Error('This savings pocket is not active on Monad.');
+  const result = await sendSponsoredCalls(account, [{
+    to: SAVINGS_POCKETS_ADDRESS,
+    data: encodeFunctionData({
+      abi: pocketsAbi,
+      functionName: 'setAutoSaveRate',
+      args: [pocketId, autoSaveBps],
+    }),
+  }]);
+  return { ...result, autoSaveBps };
+}
+
 export async function payWithAutoSaveSponsored(
   account: MeraPasskeyProfile,
   recipient: string,
@@ -495,4 +572,41 @@ export async function withdrawGiftSponsored(account: MeraPasskeyProfile, amount:
     }),
   }]);
   return { ...result, amount: formatUnits(amountRaw, 6) };
+}
+
+export async function allocateGiftToSavingsPocketSponsored(
+  account: MeraPasskeyProfile,
+  pocketId: string,
+  amount: string,
+) {
+  assertPocketId(pocketId);
+  let amountRaw: bigint;
+  try {
+    amountRaw = parseUnits(amount, 6);
+  } catch {
+    throw new Error('Enter a valid AUSD allocation with at most six decimal places.');
+  }
+  if (amountRaw <= 0n) throw new Error('Enter an AUSD allocation greater than zero.');
+  await assertSavingsContract();
+  const [giftBalance, pocket] = await Promise.all([
+    getUnallocatedGiftBalance(account.address),
+    getSavingsPocket(account.address, pocketId),
+  ]);
+  if (!pocket.exists) throw new Error('Activate this goal as an on-chain pocket before allocating gifts.');
+  const available = parseUnits(giftBalance, 6);
+  if (available < amountRaw) throw new Error(`You have ${formatUnits(available, 6)} AUSD in received gifts.`);
+  const result = await sendSponsoredCalls(account, [{
+    to: SAVINGS_POCKETS_ADDRESS,
+    data: encodeFunctionData({
+      abi: pocketsAbi,
+      functionName: 'allocateGiftToPocket',
+      args: [pocketId, amountRaw],
+    }),
+  }]);
+  return {
+    ...result,
+    amount: formatUnits(amountRaw, 6),
+    pocket: { ...pocket, balance: formatUnits(parseUnits(pocket.balance, 6) + amountRaw, 6) },
+    giftBalance: formatUnits(available - amountRaw, 6),
+  };
 }

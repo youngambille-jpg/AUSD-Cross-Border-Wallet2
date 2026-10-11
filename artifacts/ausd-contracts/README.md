@@ -21,4 +21,4 @@ The planned identity UX is a user-managed contacts book, not a global username d
 - `AUSD_TESTNET_ADDRESS` optionally overrides the configured Monad testnet AUSD address; deployment checks contract code and six decimals before sending.
 - `DEPLOYER_PRIVATE_KEY` is for deployment tooling only; never place it in the wallet app or commit it.
 
-The constructor takes the AUSD token address. The fee-free Monad testnet deployment and transaction receipt are recorded in `deployments/monad-testnet.json`. The wallet app is not yet wired to call the savings contract; that integration should batch token approval and pocket calls through the Mera-owned smart account.
+The constructor takes the AUSD token address. The fee-free Monad testnet deployment and transaction receipt are recorded in `deployments/monad-testnet.json`. The wallet calls the savings contract through the Mera-owned smart account, batching AUSD approval with deposits, payments, and gifts where approval is needed. Pocket management includes auto-save rate updates and withdrawals; received gifts can be allocated to a pocket or withdrawn to the wallet.

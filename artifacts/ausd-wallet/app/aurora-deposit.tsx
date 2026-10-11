@@ -3,18 +3,27 @@ import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, TextInput, 
 import { Feather } from '@expo/vector-icons';
 import QRCode from 'react-native-qrcode-svg';
 import * as Clipboard from 'expo-clipboard';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { router } from 'expo-router';
 import { isAddress } from 'viem';
 import { useColors } from '@/hooks/useColors';
 import { useWallet } from '@/state/wallet-context';
 import { MONAD_TESTNET } from '@/services/settlement';
 import { AuroraAsset, AuroraQuote, AuroraTransaction, getAuroraApiKeyConfigured, getAuroraAssets, getAuroraDepositStatus, requestAuroraDepositQuote } from '@/services/aurora-intents';
-import { BackButton, Body, Card, Eyebrow, InlineNotice, Page, PrimaryButton, Title } from '@/components/Primitives';
+import { BackButton, Card, InlineNotice, Page, PrimaryButton } from '@/components/Primitives';
 
 const EVM_ORIGINS = new Set(['eth', 'ethereum', 'aurora', 'avax', 'avalanche', 'base', 'bera', 'bsc', 'gnosis', 'arbitrum', 'arb', 'op', 'optimism', 'pol', 'polygon', 'scroll', 'xlayer', 'monad']);
 
 const CHAIN_NAMES: Record<string, string> = { eth: 'Ethereum', arb: 'Arbitrum', op: 'Optimism', pol: 'Polygon', avax: 'Avalanche', bsc: 'BNB Chain', gnosis: 'Gnosis' };
+const ACTIVE_DEPOSIT_STORAGE_KEY = 'ausd-wallet-active-aurora-deposit-v1';
 const chainName = (chain: string) => CHAIN_NAMES[chain.toLowerCase()] ?? chain.charAt(0).toUpperCase() + chain.slice(1);
+type DepositStep = 'form' | 'review' | 'instructions' | 'tracking';
+interface ActiveDeposit {
+  quote: AuroraQuote;
+  sourceAsset: AuroraAsset;
+  amount: string;
+  refundAddress: string;
+}
 const formatUnits = (raw: string | undefined, decimals: number) => {
   if (!raw) return '—';
   const integer = BigInt(raw);
@@ -31,6 +40,7 @@ export default function AuroraDepositScreen() {
   const [assetLoading, setAssetLoading] = useState(true);
   const [assetError, setAssetError] = useState('');
   const [selectedAssetId, setSelectedAssetId] = useState('');
+  const [selectedChain, setSelectedChain] = useState('');
   const [amount, setAmount] = useState('');
   const [refundAddress, setRefundAddress] = useState('');
   const [quote, setQuote] = useState<AuroraQuote | null>(null);
@@ -40,6 +50,9 @@ export default function AuroraDepositScreen() {
   const [status, setStatus] = useState<AuroraTransaction | null>(null);
   const [statusLoading, setStatusLoading] = useState(false);
   const [statusError, setStatusError] = useState('');
+  const [step, setStep] = useState<DepositStep>('form');
+  const [showRefundAddress, setShowRefundAddress] = useState(false);
+  const [resumedDeposit, setResumedDeposit] = useState<ActiveDeposit | null>(null);
 
   const loadAssets = useCallback(async () => {
     setAssetLoading(true);
@@ -53,6 +66,7 @@ export default function AuroraDepositScreen() {
       if (!current) throw new Error('Aurora does not currently list this wallet’s Monad AUSD token as a destination asset.');
       const source = supported.find((asset) => EVM_ORIGINS.has(asset.blockchain.toLowerCase()) && asset.blockchain.toLowerCase() !== 'monad');
       setSelectedAssetId((previous) => previous || source?.assetId || '');
+      setSelectedChain((previous) => previous || source?.blockchain || '');
     } catch (caught) {
       setAssetError(caught instanceof Error ? caught.message : 'Could not load Aurora supported tokens.');
     } finally {
@@ -62,6 +76,17 @@ export default function AuroraDepositScreen() {
 
   useEffect(() => { void loadAssets(); }, [loadAssets]);
   useEffect(() => { if (profile?.address) setRefundAddress(profile.address); }, [profile?.address]);
+  useEffect(() => {
+    AsyncStorage.getItem(ACTIVE_DEPOSIT_STORAGE_KEY)
+      .then((value) => {
+        if (!value) return;
+        const stored = JSON.parse(value) as ActiveDeposit;
+        if (stored?.quote?.quote?.depositAddress && stored.sourceAsset?.assetId) {
+          setResumedDeposit(stored);
+        }
+      })
+      .catch(() => undefined);
+  }, []);
 
   const destination = useMemo(() => assets.find((asset) => asset.blockchain.toLowerCase() === 'monad' &&
     asset.symbol.toUpperCase() === 'AUSD' &&
@@ -69,6 +94,8 @@ export default function AuroraDepositScreen() {
   const origins = useMemo(() => assets
     .filter((asset) => EVM_ORIGINS.has(asset.blockchain.toLowerCase()) && asset.blockchain.toLowerCase() !== 'monad')
     .sort((left, right) => chainName(left.blockchain).localeCompare(chainName(right.blockchain)) || left.symbol.localeCompare(right.symbol)), [assets]);
+  const sourceChains = useMemo(() => [...new Set(origins.map((asset) => asset.blockchain))], [origins]);
+  const visibleOrigins = useMemo(() => origins.filter((asset) => !selectedChain || asset.blockchain === selectedChain), [origins, selectedChain]);
   const selectedAsset = origins.find((asset) => asset.assetId === selectedAssetId);
   const amountValid = Boolean(selectedAsset && /^\d+(\.\d+)?$/.test(amount) && Number(amount) > 0 && (amount.split('.')[1]?.length ?? 0) <= selectedAsset.decimals);
 
@@ -83,6 +110,7 @@ export default function AuroraDepositScreen() {
     try {
       const result = await requestAuroraDepositQuote({ sourceAsset: selectedAsset, destinationAsset: destination, amount, recipient: profile.address, refundTo: refundAddress.trim() });
       setQuote(result);
+      setStep('review');
     } catch (caught) {
       setQuoteError(caught instanceof Error ? caught.message : 'Could not create an Aurora deposit quote.');
     } finally {
@@ -110,6 +138,32 @@ export default function AuroraDepositScreen() {
     }
   }
 
+  async function beginTracking() {
+    if (!quote || !selectedAsset) return;
+    const active: ActiveDeposit = { quote, sourceAsset: selectedAsset, amount, refundAddress };
+    await AsyncStorage.setItem(ACTIVE_DEPOSIT_STORAGE_KEY, JSON.stringify(active));
+    setResumedDeposit(active);
+    setStep('tracking');
+    void checkStatus();
+  }
+
+  function resumeTracking() {
+    if (!resumedDeposit) return;
+    setQuote(resumedDeposit.quote);
+    setSelectedAssetId(resumedDeposit.sourceAsset.assetId);
+    setSelectedChain(resumedDeposit.sourceAsset.blockchain);
+    setAmount(resumedDeposit.amount);
+    setRefundAddress(resumedDeposit.refundAddress);
+    setStep('tracking');
+  }
+
+  useEffect(() => {
+    if (step !== 'tracking' || !quote || !profile?.address || ['SUCCESS', 'REFUNDED', 'FAILED'].includes(status?.status ?? '')) return;
+    void checkStatus();
+    const timer = setInterval(() => { void checkStatus(); }, 12_000);
+    return () => clearInterval(timer);
+  }, [profile?.address, quote?.quote.depositAddress, status?.status, step]);
+
   const statusDescription = status ? ({
     KNOWN_DEPOSIT_TX: 'Deposit transaction detected; waiting for source-chain confirmation.',
     PENDING_DEPOSIT: 'Waiting for your deposit to arrive.',
@@ -124,103 +178,66 @@ export default function AuroraDepositScreen() {
     <Page contentStyle={styles.page}>
       <BackButton onPress={() => router.back()} />
       <View style={styles.heading}>
-        <Eyebrow>CROSS-CHAIN DEPOSIT</Eyebrow>
-        <Title>Deposit with Aurora</Title>
-        <Body>Bridge a supported EVM token into AUSD on Monad. Aurora creates a temporary deposit address for each quote.</Body>
+        <Text style={[styles.eyebrow, { color: colors.mutedForeground }]}>AURORA INTENTS</Text>
+        <Text style={[styles.title, { color: colors.foreground }]}>{step === 'form' ? 'Deposit to AUSD' : step === 'review' ? 'Review your quote' : step === 'instructions' ? 'Send your deposit' : 'Track your deposit'}</Text>
       </View>
 
-      {profile?.mode !== 'mera' ? <InlineNotice icon="info">A Mera passkey wallet is required as the Monad AUSD destination.</InlineNotice> : null}
+      {profile?.mode !== 'mera' ? <InlineNotice icon="info">Set up a Mera wallet to receive AUSD on Monad.</InlineNotice> : null}
       {!getAuroraApiKeyConfigured() ? (
         <InlineNotice icon="alert-circle">Aurora Intents is not configured yet. Add EXPO_PUBLIC_AURORA_INTENTS_API_KEY from Aurora Intents Studio, then restart or rebuild the app.</InlineNotice>
       ) : null}
 
-      <View style={styles.section}>
-        <Text style={[styles.sectionTitle, { color: colors.foreground }]}>Send from</Text>
-        {assetLoading ? <View style={styles.loading}><ActivityIndicator color={colors.primary} /><Text style={[styles.help, { color: colors.mutedForeground }]}>Loading supported assets…</Text></View> : null}
-        {assetError ? <Text accessibilityRole="alert" style={[styles.error, { color: colors.destructive }]}>{assetError}</Text> : null}
-        {!assetLoading && origins.length ? (
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.tokenList}>
-            {origins.map((asset) => {
-              const active = asset.assetId === selectedAssetId;
-              return <Pressable key={asset.assetId} accessibilityRole="button" accessibilityState={{ selected: active }} onPress={() => { setSelectedAssetId(asset.assetId); setQuote(null); setStatus(null); }} style={[styles.tokenChoice, { backgroundColor: active ? colors.primary : colors.secondary }]}>
-                <Text style={[styles.tokenSymbol, { color: active ? colors.primaryForeground : colors.foreground }]}>{asset.symbol}</Text>
-                <Text style={[styles.tokenChain, { color: active ? colors.primaryForeground : colors.mutedForeground }]}>{chainName(asset.blockchain)}</Text>
-              </Pressable>;
-            })}
-          </ScrollView>
-        ) : null}
-        <Text style={[styles.help, { color: colors.mutedForeground }]}>Only supported EVM assets are listed so refunds can use your 0x wallet address.</Text>
-      </View>
-
-      <Card style={styles.amountCard}>
-        <Text style={[styles.label, { color: colors.mutedForeground }]}>AMOUNT TO DEPOSIT{selectedAsset ? ` · ${selectedAsset.symbol}` : ''}</Text>
-        <TextInput accessibilityLabel="Source token amount" value={amount} onChangeText={(value) => { setAmount(value.replace(/[^0-9.]/g, '').replace(/(\..*)\./g, '$1')); setQuote(null); setStatus(null); }} placeholder="0.00" placeholderTextColor={colors.mutedForeground} keyboardType="decimal-pad" style={[styles.amountInput, { color: colors.foreground }]} />
-      </Card>
-
-      <Card style={styles.destinationCard}>
-        <View style={styles.destinationIcon}><Feather name="arrow-down" size={16} color={colors.primary} /></View>
-        <View style={styles.destinationText}>
-          <Text style={[styles.label, { color: colors.mutedForeground }]}>YOU RECEIVE</Text>
-          <Text style={[styles.destinationName, { color: colors.foreground }]}>Agora AUSD · Monad</Text>
-          <Text style={[styles.help, { color: colors.mutedForeground }]} numberOfLines={1}>{profile?.address ?? 'Wallet address unavailable'}</Text>
+      {step === 'form' ? <>
+        {resumedDeposit ? <Pressable onPress={resumeTracking} style={[styles.resumeCard, { backgroundColor: colors.secondary }]}><Feather name="clock" size={16} color={colors.primary} /><View style={{ flex: 1 }}><Text style={[styles.resumeTitle, { color: colors.foreground }]}>Resume active deposit</Text><Text style={[styles.help, { color: colors.mutedForeground }]}>{resumedDeposit.amount} {resumedDeposit.sourceAsset.symbol} from {chainName(resumedDeposit.sourceAsset.blockchain)}</Text></View><Feather name="arrow-right" size={16} color={colors.foreground} /></Pressable> : null}
+        <View style={styles.section}>
+          <Text style={[styles.sectionTitle, { color: colors.foreground }]}>From</Text>
+          {assetLoading ? <View style={styles.loading}><ActivityIndicator color={colors.primary} /><Text style={[styles.help, { color: colors.mutedForeground }]}>Loading supported assets…</Text></View> : null}
+          {assetError ? <Text accessibilityRole="alert" style={[styles.error, { color: colors.destructive }]}>{assetError}</Text> : null}
+          {!assetLoading && sourceChains.length ? <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.tokenList}>{sourceChains.map((chain) => <Pressable key={chain} onPress={() => { setSelectedChain(chain); const first = origins.find((asset) => asset.blockchain === chain); setSelectedAssetId(first?.assetId ?? ''); setQuote(null); }} style={[styles.chainChoice, { backgroundColor: selectedChain === chain ? colors.primary : colors.secondary }]}><Text style={[styles.tokenText, { color: selectedChain === chain ? colors.primaryForeground : colors.foreground }]}>{chainName(chain)}</Text></Pressable>)}</ScrollView> : null}
+          {!assetLoading && visibleOrigins.length ? <View style={styles.assetOptions}>{visibleOrigins.map((asset) => { const active = asset.assetId === selectedAssetId; return <Pressable key={asset.assetId} onPress={() => { setSelectedAssetId(asset.assetId); setQuote(null); }} style={[styles.assetChoice, { backgroundColor: active ? colors.primary : colors.secondary }]}><Text style={[styles.tokenText, { color: active ? colors.primaryForeground : colors.foreground }]}>{asset.symbol}</Text></Pressable>; })}</View> : null}
         </View>
-      </Card>
+        <Card style={styles.amountCard}><Text style={[styles.label, { color: colors.mutedForeground }]}>AMOUNT{selectedAsset ? ` · ${selectedAsset.symbol}` : ''}</Text><TextInput accessibilityLabel="Source token amount" value={amount} onChangeText={(value) => { setAmount(value.replace(/[^0-9.]/g, '').replace(/(\..*)\./g, '$1')); setQuote(null); }} placeholder="0.00" placeholderTextColor={colors.mutedForeground} keyboardType="decimal-pad" style={[styles.amountInput, { color: colors.foreground }]} /></Card>
+        <Card style={styles.destinationCard}><View style={styles.destinationIcon}><Feather name="arrow-down" size={16} color={colors.primary} /></View><View style={styles.destinationText}><Text style={[styles.label, { color: colors.mutedForeground }]}>TO</Text><Text style={[styles.destinationName, { color: colors.foreground }]}>Agora AUSD · Monad</Text><Text style={[styles.help, { color: colors.mutedForeground }]} numberOfLines={1}>{profile?.address ?? 'Wallet address unavailable'}</Text></View></Card>
+        <PrimaryButton label="Review quote" icon="arrow-right" onPress={() => void createQuote()} loading={quoteLoading} disabled={quoteLoading || !getAuroraApiKeyConfigured() || !destination || !selectedAsset || !amountValid || profile?.mode !== 'mera'} />
+        {quoteError ? <Text accessibilityRole="alert" style={[styles.error, { color: colors.destructive }]}>{quoteError}</Text> : null}
+      </> : null}
 
-      <View style={styles.refundBlock}>
-        <Text style={[styles.sectionTitle, { color: colors.foreground }]}>Refund address on source network</Text>
-        <TextInput accessibilityLabel="Aurora source network refund address" value={refundAddress} onChangeText={(value) => { setRefundAddress(value); setQuote(null); setStatus(null); }} placeholder="0x…" placeholderTextColor={colors.mutedForeground} autoCapitalize="none" autoCorrect={false} style={[styles.refundInput, { color: colors.foreground, backgroundColor: colors.secondary }]} />
-        <Text style={[styles.help, { color: colors.mutedForeground }]}>Defaults to your Monad wallet address. Change it if you want refunds sent to another EVM address you control.</Text>
-      </View>
+      {step === 'review' && quote && selectedAsset ? <>
+        <Card style={styles.quoteCard}><Text style={[styles.label, { color: colors.mutedForeground }]}>ESTIMATED RECEIVE</Text><Text style={[styles.quoteAmount, { color: colors.foreground }]}>{quote.quote.amountOutFormatted ?? '—'} AUSD</Text><View style={styles.summaryRow}><Text style={[styles.help, { color: colors.mutedForeground }]}>You send</Text><Text style={[styles.summaryValue, { color: colors.foreground }]}>{amount} {selectedAsset.symbol} · {chainName(selectedAsset.blockchain)}</Text></View><View style={styles.summaryRow}><Text style={[styles.help, { color: colors.mutedForeground }]}>Minimum receive</Text><Text style={[styles.summaryValue, { color: colors.foreground }]}>{formatUnits(quote.quote.minAmountOut, destination?.decimals ?? 6)} AUSD</Text></View>{quote.quote.timeEstimate ? <Text style={[styles.help, { color: colors.mutedForeground }]}>Estimated processing time: {quote.quote.timeEstimate} seconds</Text> : null}</Card>
+        <Pressable onPress={() => setShowRefundAddress((visible) => !visible)} style={[styles.refundToggle, { backgroundColor: colors.secondary }]}><View><Text style={[styles.summaryValue, { color: colors.foreground }]}>Refund address</Text><Text numberOfLines={1} style={[styles.help, { color: colors.mutedForeground }]}>{refundAddress}</Text></View><Feather name={showRefundAddress ? 'chevron-up' : 'chevron-down'} size={17} color={colors.foreground} /></Pressable>
+        {showRefundAddress ? <TextInput accessibilityLabel="Aurora source network refund address" value={refundAddress} onChangeText={setRefundAddress} placeholder="0x…" placeholderTextColor={colors.mutedForeground} autoCapitalize="none" autoCorrect={false} style={[styles.refundInput, { color: colors.foreground, backgroundColor: colors.secondary }]} /> : null}
+        <PrimaryButton label="Get deposit address" icon="arrow-right" onPress={() => setStep('instructions')} />
+        <PrimaryButton label="Edit deposit" secondary onPress={() => setStep('form')} />
+      </> : null}
 
-      <PrimaryButton label={quoteLoading ? 'Getting quote…' : quote ? 'Refresh deposit quote' : 'Get deposit instructions'} icon="arrow-right" onPress={() => void createQuote()} loading={quoteLoading} disabled={quoteLoading || !getAuroraApiKeyConfigured() || !destination || !selectedAsset || !amountValid || profile?.mode !== 'mera'} />
-      {quoteError ? <Text accessibilityRole="alert" style={[styles.error, { color: colors.destructive }]}>{quoteError}</Text> : null}
+      {step === 'instructions' && quote && selectedAsset ? <>
+        <Card style={styles.instructionsCard}><Text style={[styles.instructionTitle, { color: colors.foreground }]}>Send exactly {amount} {selectedAsset.symbol}</Text><Text style={[styles.help, { color: colors.mutedForeground }]}>Use {chainName(selectedAsset.blockchain)} and this temporary deposit address.</Text><View style={[styles.qrFrame, { backgroundColor: '#fff' }]}><QRCode value={quote.quote.depositAddress} size={180} color="#111111" backgroundColor="#ffffff" quietZone={10} ecl="M" /></View><Text selectable style={[styles.depositAddress, { color: colors.foreground }]}>{quote.quote.depositAddress}</Text><PrimaryButton label={copied ? 'Deposit address copied' : 'Copy deposit address'} icon={copied ? 'check' : 'copy'} onPress={() => void copyDepositAddress()} secondary />{quote.quote.depositMemo ? <View style={[styles.memoBox, { backgroundColor: colors.secondary }]}><Text style={[styles.label, { color: colors.mutedForeground }]}>REQUIRED MEMO</Text><Text selectable style={[styles.depositAddress, { color: colors.foreground }]}>{quote.quote.depositMemo}</Text></View> : null}{quote.quote.timeWhenInactive ? <Text style={[styles.help, { color: colors.mutedForeground }]}>Address expires {new Date(quote.quote.timeWhenInactive).toLocaleString()}.</Text> : null}</Card>
+        <InlineNotice icon="alert-circle">Only send the quoted token on the quoted network. This address is temporary.</InlineNotice>
+        <PrimaryButton label="I've sent it" icon="check" onPress={() => void beginTracking()} />
+        <PrimaryButton label="Back to quote" secondary onPress={() => setStep('review')} />
+      </> : null}
 
-      {quote ? (
-        <>
-          <Card style={styles.quoteCard}>
-            <View style={styles.quoteHeader}>
-              <View style={{ flex: 1 }}>
-                <Text style={[styles.quoteAmount, { color: colors.foreground }]}>{quote.quote.amountOutFormatted ?? '—'} AUSD</Text>
-                <Text style={[styles.help, { color: colors.mutedForeground }]}>Estimated receive{quote.quote.amountOutUsd ? ` · $${quote.quote.amountOutUsd}` : ''}</Text>
-                <Text style={[styles.help, { color: colors.mutedForeground }]}>Minimum after 1% slippage: {formatUnits(quote.quote.minAmountOut, destination?.decimals ?? 6)} AUSD</Text>
-              </View>
-              <View style={[styles.liveBadge, { backgroundColor: colors.secondary }]}><View style={[styles.liveDot, { backgroundColor: colors.primary }]} /><Text style={[styles.liveText, { color: colors.foreground }]}>QUOTED</Text></View>
-            </View>
-            <View style={[styles.qrFrame, { backgroundColor: '#fff' }]}><QRCode value={quote.quote.depositAddress} size={180} color="#111111" backgroundColor="#ffffff" quietZone={10} ecl="M" /></View>
-            <Text style={[styles.addressLabel, { color: colors.mutedForeground }]}>SEND {amount} {selectedAsset?.symbol} ON {selectedAsset ? chainName(selectedAsset.blockchain).toUpperCase() : ''} TO</Text>
-            <Text selectable style={[styles.depositAddress, { color: colors.foreground }]}>{quote.quote.depositAddress}</Text>
-            <PrimaryButton label={copied ? 'Deposit address copied' : 'Copy deposit address'} icon={copied ? 'check' : 'copy'} onPress={() => void copyDepositAddress()} secondary />
-            {quote.quote.depositMemo ? <View style={[styles.memoBox, { backgroundColor: colors.secondary }]}><Text style={[styles.addressLabel, { color: colors.mutedForeground }]}>REQUIRED MEMO</Text><Text selectable style={[styles.depositAddress, { color: colors.foreground }]}>{quote.quote.depositMemo}</Text></View> : null}
-            {quote.quote.timeWhenInactive ? <Text style={[styles.help, { color: colors.mutedForeground }]}>Deposit address expires {new Date(quote.quote.timeWhenInactive).toLocaleString()}.</Text> : null}
-            {quote.quote.deadline ? <Text style={[styles.help, { color: colors.mutedForeground }]}>Route deadline {new Date(quote.quote.deadline).toLocaleString()}.</Text> : null}
-          </Card>
-          <InlineNotice icon="alert-circle">Send only {selectedAsset?.symbol} on {selectedAsset ? chainName(selectedAsset.blockchain) : ''} to this quote address. Sending another token or using another network can lose funds. Refunds, if needed, go to your wallet address on the source EVM chain.</InlineNotice>
-          <PrimaryButton label={statusLoading ? 'Checking status…' : 'Check deposit status'} icon="refresh-cw" onPress={() => void checkStatus()} loading={statusLoading} />
-          {statusError ? <Text accessibilityRole="alert" style={[styles.error, { color: colors.destructive }]}>{statusError}</Text> : null}
-          {status ? <Card style={styles.statusCard}>
-            <Text style={[styles.statusLabel, { color: colors.mutedForeground }]}>{status.status.replaceAll('_', ' ')}</Text>
-            <Text style={[styles.statusDescription, { color: colors.foreground }]}>{statusDescription}</Text>
-            {status.originChainTxHashes.map((hash) => <Text key={hash} selectable style={[styles.help, { color: colors.mutedForeground }]}>Source transaction: {hash}</Text>)}
-            {status.destinationChainTxHashes.map((hash) => <Text key={hash} selectable style={[styles.help, { color: colors.mutedForeground }]}>Monad transaction: {hash}</Text>)}
-            {status.refundReason ? <Text style={[styles.help, { color: colors.destructive }]}>Refund detail: {status.refundReason}</Text> : null}
-          </Card> : null}
-        </>
-      ) : null}
-
-      <InlineNotice icon="shield">Each quote creates a one-time Aurora deposit address. Review the token, source network, amount, recipient, and expiry before sending from your external wallet.</InlineNotice>
+      {step === 'tracking' && quote ? <>
+        <Card style={styles.statusCard}><View style={styles.statusHeader}><View style={[styles.statusDot, { backgroundColor: status?.status === 'SUCCESS' ? colors.primary : colors.mutedForeground }]} /><Text style={[styles.statusLabel, { color: colors.foreground }]}>{status ? status.status.replaceAll('_', ' ') : 'WAITING FOR DEPOSIT'}</Text></View><Text style={[styles.statusDescription, { color: colors.foreground }]}>{status ? statusDescription : 'Send the quoted funds from your external wallet. We’ll check Aurora automatically.'}</Text><Text style={[styles.help, { color: colors.mutedForeground }]}>{amount} {selectedAsset?.symbol ?? resumedDeposit?.sourceAsset.symbol} → AUSD on Monad</Text>{status?.originChainTxHashes.map((hash) => <Text key={hash} selectable style={[styles.help, { color: colors.mutedForeground }]}>Source transaction: {hash}</Text>)}{status?.destinationChainTxHashes.map((hash) => <Text key={hash} selectable style={[styles.help, { color: colors.mutedForeground }]}>Monad transaction: {hash}</Text>)}{status?.refundReason ? <Text style={[styles.help, { color: colors.destructive }]}>Refund detail: {status.refundReason}</Text> : null}</Card>
+        <PrimaryButton label={statusLoading ? 'Checking status…' : 'Refresh status'} icon="refresh-cw" onPress={() => void checkStatus()} loading={statusLoading} />
+        {statusError ? <Text accessibilityRole="alert" style={[styles.error, { color: colors.destructive }]}>{statusError}</Text> : null}
+      </> : null}
     </Page>
   );
 }
 
 const styles = StyleSheet.create({
-  page: { gap: 15, paddingTop: 8, paddingBottom: 28 },
-  heading: { gap: 7, marginBottom: 2 },
+  page: { gap: 14, paddingTop: 8, paddingBottom: 28 },
+  heading: { gap: 3, marginBottom: 2 },
+  eyebrow: { fontSize: 9, letterSpacing: 0.8, fontFamily: 'Inter_600SemiBold' },
+  title: { fontSize: 23, lineHeight: 29, letterSpacing: -0.5, fontFamily: 'Inter_600SemiBold' },
   section: { gap: 10 },
   sectionTitle: { fontSize: 15, fontFamily: 'Inter_600SemiBold' },
   tokenList: { gap: 8, paddingRight: 4 },
-  tokenChoice: { minWidth: 84, borderRadius: 15, paddingHorizontal: 12, paddingVertical: 10, gap: 4 },
-  tokenSymbol: { fontSize: 13, fontFamily: 'Inter_600SemiBold' },
-  tokenChain: { fontSize: 10, fontFamily: 'Inter_400Regular' },
+  chainChoice: { minHeight: 38, borderRadius: 12, paddingHorizontal: 14, alignItems: 'center', justifyContent: 'center' },
+  assetOptions: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  assetChoice: { minHeight: 38, minWidth: 70, borderRadius: 12, paddingHorizontal: 14, alignItems: 'center', justifyContent: 'center' },
+  tokenText: { fontSize: 12, fontFamily: 'Inter_600SemiBold' },
   help: { fontSize: 11, lineHeight: 16, fontFamily: 'Inter_400Regular' },
   error: { fontSize: 12, lineHeight: 17, fontFamily: 'Inter_500Medium' },
   loading: { flexDirection: 'row', alignItems: 'center', gap: 8 },
@@ -231,19 +248,22 @@ const styles = StyleSheet.create({
   destinationIcon: { width: 34, height: 34, borderRadius: 12, alignItems: 'center', justifyContent: 'center', backgroundColor: '#00000010' },
   destinationText: { flex: 1, gap: 3 },
   destinationName: { fontSize: 14, fontFamily: 'Inter_600SemiBold' },
-  refundBlock: { gap: 8 },
   refundInput: { minHeight: 48, borderRadius: 14, paddingHorizontal: 13, fontSize: 12, fontFamily: 'Inter_500Medium' },
-  quoteCard: { alignItems: 'center', gap: 12, padding: 16 },
-  quoteHeader: { width: '100%', flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8 },
+  quoteCard: { gap: 12, padding: 16 },
   quoteAmount: { fontSize: 23, fontFamily: 'Inter_600SemiBold' },
-  liveBadge: { flexDirection: 'row', alignItems: 'center', gap: 6, borderRadius: 14, paddingHorizontal: 9, paddingVertical: 6 },
-  liveDot: { width: 6, height: 6, borderRadius: 3 },
-  liveText: { fontSize: 9, letterSpacing: 0.6, fontFamily: 'Inter_700Bold' },
+  summaryRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: 12 },
+  summaryValue: { fontSize: 12, fontFamily: 'Inter_600SemiBold', flexShrink: 1, textAlign: 'right' },
+  refundToggle: { minHeight: 58, borderRadius: 14, paddingHorizontal: 14, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 10 },
+  instructionsCard: { alignItems: 'center', gap: 12, padding: 16 },
+  instructionTitle: { fontSize: 16, fontFamily: 'Inter_600SemiBold', textAlign: 'center' },
   qrFrame: { padding: 10, borderRadius: 12 },
-  addressLabel: { alignSelf: 'stretch', fontSize: 9, letterSpacing: 0.6, fontFamily: 'Inter_600SemiBold' },
-  depositAddress: { alignSelf: 'stretch', fontSize: 11, lineHeight: 17, fontFamily: 'Inter_500Medium' },
+  depositAddress: { alignSelf: 'stretch', fontSize: 10, lineHeight: 16, fontFamily: 'Inter_500Medium', textAlign: 'center' },
   memoBox: { alignSelf: 'stretch', gap: 6, borderRadius: 12, padding: 12 },
-  statusCard: { gap: 7, padding: 15 },
+  statusCard: { gap: 10, padding: 16 },
+  statusHeader: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  statusDot: { width: 8, height: 8, borderRadius: 4 },
   statusLabel: { fontSize: 10, letterSpacing: 0.7, fontFamily: 'Inter_700Bold' },
   statusDescription: { fontSize: 13, lineHeight: 18, fontFamily: 'Inter_500Medium' },
+  resumeCard: { minHeight: 64, borderRadius: 14, paddingHorizontal: 14, flexDirection: 'row', alignItems: 'center', gap: 10 },
+  resumeTitle: { fontSize: 13, fontFamily: 'Inter_600SemiBold' },
 });

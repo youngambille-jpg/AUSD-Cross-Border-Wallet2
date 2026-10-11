@@ -26,7 +26,7 @@ const money = (amount: number) =>
   amount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 6 });
 
 export default function SendDrawer() {
-  const params = useLocalSearchParams<{ recipient?: string; recipientName?: string; token?: string }>();
+  const params = useLocalSearchParams<{ recipient?: string; recipientName?: string; token?: string; amount?: string }>();
   const colors = useColors();
   const insets = useSafeAreaInsets();
   const { height: windowHeight } = useWindowDimensions();
@@ -61,7 +61,11 @@ export default function SendDrawer() {
   }, [params.recipient, params.recipientName]);
 
   useEffect(() => {
-    if (params.token === 'AUSD' || params.token === 'USDC') setToken(params.token);
+    if (params.amount && /^\d+(\.\d+)?$/.test(params.amount)) setAmount(params.amount);
+  }, [params.amount]);
+
+  useEffect(() => {
+    if (params.token === 'AUSD' || params.token === 'USDC' || params.token === 'CTK') setToken(params.token);
   }, [params.token]);
 
   useEffect(() => {

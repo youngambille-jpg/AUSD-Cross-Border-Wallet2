@@ -30,7 +30,7 @@ export const WALLET_TOKENS: Record<WalletToken, WalletTokenInfo> = {
   },
 };
 
-export const TRANSFER_TOKENS: WalletToken[] = ['AUSD', 'USDC'];
+export const TRANSFER_TOKENS: WalletToken[] = ['AUSD', 'USDC', 'CTK'];
 export const STABLECOIN_TOKENS: WalletToken[] = ['AUSD', 'USDC'];
 
 export function getWalletToken(symbol: string | undefined, fallback: WalletToken = 'AUSD') {
