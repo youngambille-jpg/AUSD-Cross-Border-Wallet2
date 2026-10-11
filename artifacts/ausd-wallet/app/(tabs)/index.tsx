@@ -49,15 +49,12 @@ export default function WalletHome() {
 
   const refreshBalances = useCallback(async () => {
     if (!isMeraWallet || !profile?.address) return;
-    let active = true;
     const results = await Promise.allSettled(assets.map((asset) => getErc20Balance(profile.address!, asset)));
-    if (!active) return;
     setAssetBalances(Object.fromEntries(results.map((result, index) => [
       assets[index].address.toLowerCase(),
       result.status === 'fulfilled' ? Number(result.value) : null,
     ])));
     setChainBalanceError(results.some((result) => result.status === 'rejected') ? 'Some balances are unavailable' : '');
-    active = false;
   }, [assets, isMeraWallet, profile?.address]);
 
   useEffect(() => {
