@@ -4,6 +4,7 @@ import {
   Image,
   Platform,
   Pressable,
+  RefreshControl,
   ScrollView,
   StyleSheet,
   Text,
@@ -21,10 +22,14 @@ export function Page({
   children,
   scroll = true,
   contentStyle,
+  refreshing = false,
+  onRefresh,
 }: {
   children: React.ReactNode;
   scroll?: boolean;
   contentStyle?: ViewStyle;
+  refreshing?: boolean;
+  onRefresh?: () => void;
 }) {
   const colors = useColors();
   const insets = useSafeAreaInsets();
@@ -53,6 +58,7 @@ export function Page({
           contentContainerStyle={styles.scroll}
           keyboardShouldPersistTaps="handled"
           showsVerticalScrollIndicator={false}
+          refreshControl={onRefresh ? <RefreshControl refreshing={refreshing} onRefresh={onRefresh} /> : undefined}
         >
           {body}
         </ScrollView>

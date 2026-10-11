@@ -73,6 +73,7 @@ export function useIndexedActivity(account?: string) {
   const [savings, setSavings] = useState<IndexedSavingsActivity[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [refreshKey, setRefreshKey] = useState(0);
 
   useEffect(() => {
     if (!GRAPHQL_URL || !account) {
@@ -102,9 +103,9 @@ export function useIndexedActivity(account?: string) {
         if (active) setLoading(false);
       });
     return () => { active = false; };
-  }, [account]);
+  }, [account, refreshKey]);
 
-  return { transfers, savings, loading, error, configured: Boolean(GRAPHQL_URL) };
+  return { transfers, savings, loading, error, configured: Boolean(GRAPHQL_URL), refresh: () => setRefreshKey((value) => value + 1) };
 }
 
 export function formatIndexedTransfer(transfer: IndexedTransfer, account: string) {

@@ -1,12 +1,17 @@
-import React, { useEffect, useState } from 'react';
-import { Modal, PanResponder, Pressable, ScrollView, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { Modal, PanResponder, Pressable, ScrollView, StyleSheet, Text, TextInput, View, useWindowDimensions } from 'react-native';
 import { Feather } from '@expo/vector-icons';
 import { router } from 'expo-router';
 import { useColors } from '@/hooks/useColors';
 import { useWallet } from '@/state/wallet-context';
-import { getAUSDBalance, getUSDCBalance } from '@/services/passkey';
+import { getErc20Balance, getErc20TokenInfo, type Erc20TokenInfo } from '@/services/passkey';
 import { formatIndexedTransfer, useIndexedActivity } from '@/services/indexed-activity';
+import { WALLET_TOKENS } from '@/services/tokens';
 import { Card, Divider, Eyebrow, Page, PrimaryButton } from '@/components/Primitives';
+
+const TRACKED_ASSETS_STORAGE_KEY = 'ausd-wallet-tracked-assets-v1';
+const defaultAssets: Erc20TokenInfo[] = [WALLET_TOKENS.AUSD, WALLET_TOKENS.USDC];
 
 const money = (amount: number) =>
   amount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -15,28 +20,76 @@ export default function WalletHome() {
   const colors = useColors();
   const { height: windowHeight } = useWindowDimensions();
   const { profile, balance, transfers } = useWallet();
-  const { transfers: indexedTransfers, error: activityError, configured } = useIndexedActivity(profile?.address);
-  const [chainBalance, setChainBalance] = useState<string | null>(null);
-  const [usdcBalance, setUsdcBalance] = useState<string | null>(null);
+  const { transfers: indexedTransfers, error: activityError, configured, refresh: refreshActivity } = useIndexedActivity(profile?.address);
+  const [trackedAssets, setTrackedAssets] = useState<Erc20TokenInfo[]>([]);
+  const [assetBalances, setAssetBalances] = useState<Record<string, number | null>>({});
   const [chainBalanceError, setChainBalanceError] = useState('');
+  const [refreshing, setRefreshing] = useState(false);
+  const [assetModalOpen, setAssetModalOpen] = useState(false);
+  const [assetAddress, setAssetAddress] = useState('');
+  const [assetError, setAssetError] = useState('');
+  const [addingAsset, setAddingAsset] = useState(false);
   const [openAction, setOpenAction] = useState<'deposit' | 'swap' | null>(null);
   const [drawerOffset, setDrawerOffset] = useState(0);
   const isMeraWallet = profile?.mode === 'mera';
+  const assets = useMemo(() => [
+    ...defaultAssets,
+    ...trackedAssets.filter((asset) => !defaultAssets.some((defaultAsset) => defaultAsset.address.toLowerCase() === asset.address.toLowerCase())),
+  ], [trackedAssets]);
 
   useEffect(() => {
+    AsyncStorage.getItem(TRACKED_ASSETS_STORAGE_KEY)
+      .then((value) => {
+        if (!value) return;
+        const stored = JSON.parse(value) as Erc20TokenInfo[];
+        if (Array.isArray(stored)) setTrackedAssets(stored);
+      })
+      .catch(() => setChainBalanceError('Saved assets could not be loaded.'));
+  }, []);
+
+  const refreshBalances = useCallback(async () => {
     if (!isMeraWallet || !profile?.address) return;
     let active = true;
-    Promise.allSettled([getAUSDBalance(profile.address), getUSDCBalance(profile.address)])
-      .then(([ausdResult, usdcResult]) => {
-        if (!active) return;
-        if (ausdResult.status === 'fulfilled') setChainBalance(ausdResult.value);
-        if (usdcResult.status === 'fulfilled') setUsdcBalance(usdcResult.value);
-        setChainBalanceError(ausdResult.status === 'rejected' || usdcResult.status === 'rejected'
-          ? 'Some balances are unavailable'
-          : '');
-      });
-    return () => { active = false; };
-  }, [isMeraWallet, profile?.address]);
+    const results = await Promise.allSettled(assets.map((asset) => getErc20Balance(profile.address!, asset)));
+    if (!active) return;
+    setAssetBalances(Object.fromEntries(results.map((result, index) => [
+      assets[index].address.toLowerCase(),
+      result.status === 'fulfilled' ? Number(result.value) : null,
+    ])));
+    setChainBalanceError(results.some((result) => result.status === 'rejected') ? 'Some balances are unavailable' : '');
+    active = false;
+  }, [assets, isMeraWallet, profile?.address]);
+
+  useEffect(() => {
+    void refreshBalances();
+  }, [refreshBalances]);
+
+  async function refreshHome() {
+    setRefreshing(true);
+    refreshActivity();
+    await refreshBalances();
+    setRefreshing(false);
+  }
+
+  async function addAsset() {
+    setAssetError('');
+    setAddingAsset(true);
+    try {
+      const asset = await getErc20TokenInfo(assetAddress.trim());
+      if (assets.some((item) => item.address.toLowerCase() === asset.address.toLowerCase())) {
+        throw new Error(`${asset.symbol} is already in your assets.`);
+      }
+      const next = [...trackedAssets, asset];
+      await AsyncStorage.setItem(TRACKED_ASSETS_STORAGE_KEY, JSON.stringify(next));
+      setTrackedAssets(next);
+      setAssetAddress('');
+      setAssetModalOpen(false);
+    } catch (caught) {
+      setAssetError(caught instanceof Error ? caught.message : 'This token could not be added.');
+    } finally {
+      setAddingAsset(false);
+    }
+  }
   const indexedHashes = new Set(indexedTransfers.map((item) => item.transactionHash.toLowerCase()));
   const recent = configured && !activityError
     ? [
@@ -50,8 +103,8 @@ export default function WalletHome() {
         return new Date(rightDate).getTime() - new Date(leftDate).getTime();
       }).slice(0, 3)
     : transfers.slice(0, 3).map((item) => ({ local: item }));
-  const ausd = isMeraWallet ? (chainBalance === null ? null : Number(chainBalance)) : balance;
-  const usdc = isMeraWallet ? (usdcBalance === null ? null : Number(usdcBalance)) : 0;
+  const ausd = isMeraWallet ? assetBalances[WALLET_TOKENS.AUSD.address.toLowerCase()] ?? null : balance;
+  const usdc = isMeraWallet ? assetBalances[WALLET_TOKENS.USDC.address.toLowerCase()] ?? null : 0;
   const totalBalance = ausd === null || usdc === null ? null : ausd + usdc;
   const drawerPan = PanResponder.create({
     onMoveShouldSetPanResponder: (_event, gesture) => gesture.dy > 5,
@@ -63,7 +116,7 @@ export default function WalletHome() {
   });
 
   return (
-    <Page contentStyle={styles.page}>
+    <Page contentStyle={styles.page} refreshing={refreshing} onRefresh={() => { void refreshHome(); }}>
       <View style={styles.header}>
         <View>
           <Eyebrow>MONAD WALLET</Eyebrow>
@@ -185,12 +238,44 @@ export default function WalletHome() {
 
       <View style={styles.sectionHead}>
         <Text style={[styles.sectionTitle, { color: colors.foreground }]}>Assets</Text>
+        <Pressable accessibilityRole="button" accessibilityLabel="Add an asset" onPress={() => { setAssetError(''); setAssetModalOpen(true); }}>
+          <Text style={[styles.seeAll, { color: colors.primary }]}>Add asset</Text>
+        </Pressable>
       </View>
       <Card style={styles.assetCard}>
-        <AssetRow symbol="A" name="Agora AUSD" amount={ausd} />
-        <Divider />
-        <AssetRow symbol="$" name="USD Coin" amount={usdc} />
+        {assets.map((asset, index) => (
+          <React.Fragment key={asset.address}>
+            {index > 0 ? <Divider /> : null}
+            <AssetRow symbol={asset.symbol.slice(0, 1)} name={asset.name} ticker={asset.symbol} amount={isMeraWallet ? assetBalances[asset.address.toLowerCase()] ?? null : asset.symbol === 'AUSD' ? balance : 0} />
+          </React.Fragment>
+        ))}
       </Card>
+
+      <Modal visible={assetModalOpen} transparent animationType="fade" onRequestClose={() => setAssetModalOpen(false)}>
+        <View style={styles.assetModalOverlay}>
+          <Pressable style={StyleSheet.absoluteFill} onPress={() => setAssetModalOpen(false)} accessibilityLabel="Close add asset" />
+          <View style={[styles.assetModal, { backgroundColor: colors.background }]}>
+            <Text style={[styles.assetModalTitle, { color: colors.foreground }]}>Add asset</Text>
+            <Text style={[styles.assetModalCopy, { color: colors.mutedForeground }]}>Enter an ERC-20 contract address on Monad testnet. Assets added here are tracked on this device.</Text>
+            <TextInput
+              accessibilityLabel="Token contract address"
+              value={assetAddress}
+              onChangeText={setAssetAddress}
+              placeholder="0x…"
+              placeholderTextColor={colors.mutedForeground}
+              autoCapitalize="none"
+              autoCorrect={false}
+              selectionColor={colors.primary}
+              style={[styles.assetInput, { color: colors.foreground, borderColor: colors.border, backgroundColor: colors.secondary }]}
+            />
+            {assetError ? <Text style={[styles.assetError, { color: colors.destructive }]}>{assetError}</Text> : null}
+            <View style={styles.assetModalActions}>
+              <PrimaryButton label="Cancel" secondary onPress={() => setAssetModalOpen(false)} />
+              <PrimaryButton label="Add asset" icon="plus" loading={addingAsset} onPress={() => { void addAsset(); }} />
+            </View>
+          </View>
+        </View>
+      </Modal>
 
       <View style={styles.sectionHead}>
         <Text style={[styles.sectionTitle, { color: colors.foreground }]}>Recent activity</Text>
@@ -248,7 +333,7 @@ export default function WalletHome() {
   );
 }
 
-function AssetRow({ symbol, name, amount }: { symbol: string; name: string; amount: number | null }) {
+function AssetRow({ symbol, name, ticker, amount }: { symbol: string; name: string; ticker: string; amount: number | null }) {
   const colors = useColors();
   return (
     <View style={styles.assetRow}>
@@ -257,11 +342,11 @@ function AssetRow({ symbol, name, amount }: { symbol: string; name: string; amou
       </View>
       <View style={styles.assetInfo}>
         <Text style={[styles.assetName, { color: colors.foreground }]}>{name}</Text>
-        <Text style={[styles.assetTicker, { color: colors.mutedForeground }]}>{symbol === 'A' ? 'AUSD' : 'USDC'}</Text>
+        <Text style={[styles.assetTicker, { color: colors.mutedForeground }]}>{ticker}</Text>
       </View>
       <View style={styles.assetValue}>
         <Text style={[styles.assetAmount, { color: colors.foreground }]}>{amount === null ? '—' : money(amount)}</Text>
-        <Text style={[styles.assetUsd, { color: colors.mutedForeground }]}>${amount === null ? '—' : money(amount)}</Text>
+        <Text style={[styles.assetUsd, { color: colors.mutedForeground }]}>{ticker === 'AUSD' || ticker === 'USDC' ? `$${amount === null ? '—' : money(amount)}` : ticker}</Text>
       </View>
     </View>
   );
@@ -350,4 +435,11 @@ const styles = StyleSheet.create({
   emptyActivity: { alignItems: 'center', paddingVertical: 21, gap: 6 },
   emptyTitle: { marginTop: 3, fontSize: 14, fontFamily: 'Inter_600SemiBold' },
   emptyCopy: { fontSize: 11, fontFamily: 'Inter_400Regular' },
+  assetModalOverlay: { flex: 1, justifyContent: 'center', padding: 22, backgroundColor: 'rgba(16, 18, 24, 0.48)' },
+  assetModal: { borderRadius: 20, padding: 20, gap: 13 },
+  assetModalTitle: { fontSize: 21, fontFamily: 'Inter_600SemiBold' },
+  assetModalCopy: { fontSize: 12, lineHeight: 18, fontFamily: 'Inter_400Regular' },
+  assetInput: { minHeight: 48, borderWidth: 1, borderRadius: 12, paddingHorizontal: 13, fontSize: 13, fontFamily: 'Inter_400Regular' },
+  assetError: { fontSize: 11, lineHeight: 16, fontFamily: 'Inter_400Regular' },
+  assetModalActions: { flexDirection: 'row', gap: 10 },
 });

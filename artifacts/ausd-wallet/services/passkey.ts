@@ -61,6 +61,8 @@ const ausdAbi = [
   { type: 'function', name: 'transfer', stateMutability: 'nonpayable', inputs: [{ name: 'to', type: 'address' }, { name: 'amount', type: 'uint256' }], outputs: [{ type: 'bool' }] },
 ] as const;
 const balanceAbi = [
+  { type: 'function', name: 'name', stateMutability: 'view', inputs: [], outputs: [{ type: 'string' }] },
+  { type: 'function', name: 'symbol', stateMutability: 'view', inputs: [], outputs: [{ type: 'string' }] },
   { type: 'function', name: 'decimals', stateMutability: 'view', inputs: [], outputs: [{ type: 'uint8' }] },
   { type: 'function', name: 'balanceOf', stateMutability: 'view', inputs: [{ name: 'account', type: 'address' }], outputs: [{ type: 'uint256' }] },
 ] as const;
@@ -398,14 +400,32 @@ export async function getUSDCBalance(account: string) {
 }
 
 export async function getTokenBalance(account: string, token: WalletToken) {
-  if (!isAddress(account, { strict: false })) throw new Error('Invalid Monad wallet address.');
-  const info = WALLET_TOKENS[token];
-  const [decimals, rawBalance] = await Promise.all([
-    publicClient.readContract({ address: info.address, abi: balanceAbi, functionName: 'decimals' }),
-    publicClient.readContract({ address: info.address, abi: balanceAbi, functionName: 'balanceOf', args: [account as Address] }),
+  return getErc20Balance(account, WALLET_TOKENS[token]);
+}
+
+export interface Erc20TokenInfo {
+  address: Address;
+  name: string;
+  symbol: string;
+  decimals: number;
+}
+
+export async function getErc20TokenInfo(address: string): Promise<Erc20TokenInfo> {
+  if (!isAddress(address, { strict: false })) throw new Error('Enter a valid token contract address.');
+  const tokenAddress = address as Address;
+  const [name, symbol, decimals] = await Promise.all([
+    publicClient.readContract({ address: tokenAddress, abi: balanceAbi, functionName: 'name' }),
+    publicClient.readContract({ address: tokenAddress, abi: balanceAbi, functionName: 'symbol' }),
+    publicClient.readContract({ address: tokenAddress, abi: balanceAbi, functionName: 'decimals' }),
   ]);
-  if (decimals !== info.decimals) throw new Error(`Monad ${token} reports ${decimals} decimals; expected ${info.decimals}.`);
-  return formatUnits(rawBalance, decimals);
+  if (!name.trim() || !symbol.trim() || decimals > 255) throw new Error('This contract does not expose a supported ERC-20 token.');
+  return { address: tokenAddress, name: name.trim(), symbol: symbol.trim(), decimals };
+}
+
+export async function getErc20Balance(account: string, token: Pick<Erc20TokenInfo, 'address' | 'decimals'>) {
+  if (!isAddress(account, { strict: false })) throw new Error('Invalid Monad wallet address.');
+  const rawBalance = await publicClient.readContract({ address: token.address, abi: balanceAbi, functionName: 'balanceOf', args: [account as Address] });
+  return formatUnits(rawBalance, token.decimals);
 }
 
 export interface SponsoredTransferResult {
