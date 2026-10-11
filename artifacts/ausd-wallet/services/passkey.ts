@@ -85,7 +85,10 @@ export function getPasskeyErrorMessage(error: unknown) {
   if (causeText.includes('cancel')) {
     return 'Passkey prompt cancelled. You can try again when you’re ready.';
   }
-  return error.message || 'Passkey authentication did not complete. Please try again.';
+  const message = error.message || 'Passkey authentication did not complete. Please try again.';
+  return nativeDetails && !message.includes(nativeDetails)
+    ? `${message} Native error: ${nativeDetails}`
+    : message;
 }
 
 function getNativePasskeyErrorDetails(error: unknown): string {
@@ -95,9 +98,10 @@ function getNativePasskeyErrorDetails(error: unknown): string {
   for (let depth = 0; depth < 4 && current; depth += 1) {
     if (current instanceof Error) {
       const shaped = current as Error & { code?: unknown; error?: unknown; cause?: unknown };
-      const code = typeof shaped.code === 'string' ? shaped.code : undefined;
+      const code = [shaped.code, shaped.error].find((part): part is string => typeof part === 'string');
       const message = shaped.message.trim();
-      const detail = [code, message && message !== code ? message : undefined]
+      const name = shaped.name && shaped.name !== 'Error' ? shaped.name : undefined;
+      const detail = [name, code, message && message !== code ? message : undefined]
         .filter((part): part is string => Boolean(part))
         .join(': ');
       if (detail && !details.includes(detail)) details.push(detail);
