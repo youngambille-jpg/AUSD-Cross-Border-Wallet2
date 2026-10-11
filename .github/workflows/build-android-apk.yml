@@ -112,6 +112,29 @@ jobs:
             -storepass android \
             -keypass android | grep -E "Alias name|SHA256:"
 
+      - name: Print actual APK signing certificate
+        working-directory: artifacts/ausd-wallet/android
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APK="$(find app/build/outputs/apk/release -maxdepth 1 -name '*.apk' -print -quit)"
+
+          if [[ -z "$APK" ]]; then
+            echo "::error::Release APK not found"
+            exit 1
+          fi
+
+          APKSIGNER="$(find "$ANDROID_HOME/build-tools" -name apksigner -type f | sort -V | tail -n 1)"
+
+          if [[ -z "$APKSIGNER" ]]; then
+            echo "::error::apksigner not found"
+            exit 1
+          fi
+
+          echo "APK: $APK"
+          "$APKSIGNER" verify --print-certs "$APK"
+
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
