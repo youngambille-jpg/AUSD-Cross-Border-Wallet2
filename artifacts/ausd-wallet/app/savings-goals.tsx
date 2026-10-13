@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Alert, Modal, Pressable, ScrollView, Share, StyleSheet, Text, TextInput, View } from 'react-native';
 import { Feather } from '@expo/vector-icons';
+import * as Clipboard from 'expo-clipboard';
 import { router } from 'expo-router';
 import { Card, Eyebrow, Field, InlineNotice, Page, PrimaryButton, Title } from '@/components/Primitives';
 import { useColors } from '@/hooks/useColors';
@@ -29,6 +30,28 @@ import {
   type SharedPocket,
 } from '@/services/shared-pockets';
 import { useWallet } from '@/state/wallet-context';
+import { buildGiftLink } from '@/services/gift-links';
+import {
+  MILESTONES,
+  countStreak,
+  loadCelebrated,
+  loadDepositWeeks,
+  markCelebrated,
+  recordDepositWeek,
+} from '@/services/streaks';
+import {
+  addSchedule,
+  advanceSchedule,
+  describeSchedule,
+  firstDueDate,
+  isDue,
+  loadSchedules,
+  removeSchedule,
+  saveSchedules,
+  updateSchedule,
+  type SaveSchedule,
+  type ScheduleFrequency,
+} from '@/services/schedules';
 
 const money = (amount: number) => amount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
@@ -44,8 +67,11 @@ export default function SavingsGoalsScreen() {
   const [contribution, setContribution] = useState('');
   const [autoSaveRate, setAutoSaveRate] = useState('10');
   const [activeGoal, setActiveGoal] = useState<string | null>(null);
-  const [goalSheetMode, setGoalSheetMode] = useState<'menu' | 'deposit' | 'rate' | 'withdraw'>('menu');
+  const [goalSheetMode, setGoalSheetMode] = useState<'menu' | 'deposit' | 'rate' | 'withdraw' | 'schedule'>('menu');
   const [utilityAmount, setUtilityAmount] = useState('');
+  const [schedules, setSchedules] = useState<SaveSchedule[]>([]);
+  const [scheduleAmount, setScheduleAmount] = useState('');
+  const [scheduleFrequency, setScheduleFrequency] = useState<ScheduleFrequency>('weekly');
   const [selectedGiftGoal, setSelectedGiftGoal] = useState('');
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -57,9 +83,14 @@ export default function SavingsGoalsScreen() {
   const [giftAmount, setGiftAmount] = useState('');
   const [giftRecipient, setGiftRecipient] = useState('');
   const [giftPocket, setGiftPocket] = useState('');
+  const [lastGiftLink, setLastGiftLink] = useState('');
+  const [giftCopied, setGiftCopied] = useState(false);
   const [pocketCode, setPocketCode] = useState('');
   const [showCreate, setShowCreate] = useState(false);
   const [activeSheet, setActiveSheet] = useState<'gift' | 'more' | 'shared' | 'restore' | 'gifts' | 'allocate' | null>(null);
+  const [depositWeeks, setDepositWeeks] = useState<Record<string, string[]>>({});
+  const [celebrated, setCelebrated] = useState<Record<string, number[]>>({});
+  const [celebration, setCelebration] = useState<{ goalId: string; name: string; pct: number } | null>(null);
   const account = profile?.mode === 'mera' && profile.address && profile.signerAddress && profile.passkey
     ? { address: profile.address, signerAddress: profile.signerAddress, credential: profile.passkey.credential, rpId: profile.passkey.rpId }
     : null;
@@ -115,6 +146,31 @@ export default function SavingsGoalsScreen() {
 
   useEffect(() => { void refresh(); }, [refresh]);
 
+  useEffect(() => {
+    if (!account) return;
+    void loadDepositWeeks().then(setDepositWeeks).catch(() => undefined);
+    void loadCelebrated().then(setCelebrated).catch(() => undefined);
+    void loadSchedules().then(setSchedules).catch(() => undefined);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [account?.address]);
+
+  useEffect(() => {
+    if (loading || celebration) return;
+    for (const goal of goals) {
+      const pocket = pocketStates[goal.id];
+      const savedAmount = pocket?.exists ? Number(pocket.balance) : goal.saved;
+      if (!Number.isFinite(savedAmount) || goal.target <= 0) continue;
+      const pct = Math.min(1, savedAmount / goal.target);
+      const crossed = MILESTONES.filter((mark) => pct * 100 >= mark && !(celebrated[goal.id] ?? []).includes(mark));
+      if (crossed.length) {
+        const highest = Math.max(...crossed);
+        setCelebration({ goalId: goal.id, name: goal.name, pct: highest });
+        void markCelebrated(goal.id, highest).then(setCelebrated).catch(() => undefined);
+        break;
+      }
+    }
+  }, [goals, pocketStates, celebrated, loading, celebration]);
+
   async function importSharedPocket() {
     if (!account) return setError('Unlock your Mera wallet before tracking a shared pocket.');
     try {
@@ -169,6 +225,13 @@ export default function SavingsGoalsScreen() {
       const result = tracked
         ? await giftToPocketSponsored(account, recipient, tracked.pocketId, giftAmount)
         : await giftToPersonSponsored(account, recipient, giftAmount);
+      setLastGiftLink(buildGiftLink({
+        recipient: contact.address,
+        amount: result.amount,
+        txHash: result.transactionHash,
+        ...(profile?.displayName ? { donor: profile.displayName } : {}),
+      }));
+      setGiftCopied(false);
       setGiftAmount('');
       setGiftRecipient('');
       setGiftPocket('');
@@ -352,6 +415,7 @@ export default function SavingsGoalsScreen() {
       setPocketStates((current) => ({ ...current, [goal.id]: result.pocket }));
       setGiftBalance(result.giftBalance);
       setActiveSheet(null);
+      void recordDepositWeek(goal.id).then(setDepositWeeks).catch(() => undefined);
       Alert.alert('Gift added to goal', `${result.amount} AUSD was added to ${goal.name}.\n\n${result.transactionHash}`);
       await refresh();
     } catch (caught) {
@@ -375,6 +439,17 @@ export default function SavingsGoalsScreen() {
       setBalance((current) => current === null ? null : Math.max(0, current - Number(result.amount)));
       setContribution('');
       setActiveGoal(null);
+      void recordDepositWeek(goal.id).then(setDepositWeeks).catch(() => undefined);
+      void (async () => {
+        try {
+          const current = await loadSchedules();
+          const advanced = current.map((item) => item.goalId === goal.id && isDue(item) ? advanceSchedule(item) : item);
+          await saveSchedules(advanced);
+          setSchedules(advanced);
+        } catch {
+          // Schedule roll-forward is best-effort; the deposit already succeeded.
+        }
+      })();
       Alert.alert('AUSD deposited', `${money(Number(result.amount))} AUSD was deposited into ${goal.name} on Monad testnet. Gas sponsorship was requested.`);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'The sponsored pocket deposit did not complete.');
@@ -383,11 +458,67 @@ export default function SavingsGoalsScreen() {
     }
   };
 
+  const createSchedule = async () => {
+    if (!focusedGoal) return setError('Select a goal first.');
+    if (!/^\d+(\.\d{1,2})?$/.test(scheduleAmount) || Number(scheduleAmount) <= 0) {
+      return setError('Enter a schedule amount greater than zero, with up to two decimals.');
+    }
+    setSaving(true);
+    setError('');
+    try {
+      const updated = await addSchedule({
+        goalId: focusedGoal.id,
+        amount: scheduleAmount,
+        frequency: scheduleFrequency,
+        nextDue: firstDueDate(scheduleFrequency).toISOString(),
+        active: true,
+      });
+      setSchedules(updated);
+      setScheduleAmount('');
+      setGoalSheetMode('menu');
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Could not save this schedule.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  function openDepositFor(goalId: string, amount?: string) {
+    setError('');
+    setActiveGoal(goalId);
+    setGoalSheetMode('deposit');
+    setContribution(amount ?? '');
+  }
+
+  const dueSchedules = schedules.filter((item) => isDue(item));
+  const focusedSchedules = focusedGoal ? schedules.filter((item) => item.goalId === focusedGoal.id) : [];
+
   const shareBackup = async () => {
     const backup = await exportSavingsVault();
     if (!backup) return setError('Create a savings goal first to make an encrypted backup.');
     await Share.share({ message: backup, title: 'Encrypted Mera savings plan backup' });
   };
+
+  async function shareGoalMilestone() {
+    const note = celebration;
+    setCelebration(null);
+    if (!note) return;
+    const goal = goals.find((item) => item.id === note.goalId);
+    const saved = goal
+      ? (() => {
+        const pocket = pocketStates[goal.id];
+        return pocket?.exists ? Number(pocket.balance) : goal.saved;
+      })()
+      : null;
+    const message = saved !== null && Number.isFinite(saved)
+      ? `I'm ${note.pct}% of the way to my "${note.name}" goal (${money(saved)} AUSD saved) on AUSD Wallet.`
+      : `I'm ${note.pct}% of the way to my "${note.name}" goal on AUSD Wallet.`;
+    try {
+      await Share.share({ title: `${note.name} savings milestone`, message });
+    } catch {
+      // Sharing is optional; dismiss silently.
+    }
+  }
 
   const restoreBackup = async () => {
     if (!account || !backupText.trim()) return setError('Paste an encrypted savings plan backup first.');
@@ -444,6 +575,49 @@ export default function SavingsGoalsScreen() {
           </View>
 
           {localTrackedTotal > 0 ? <Text style={[styles.localNote, { color: colors.mutedForeground }]}>{money(localTrackedTotal)} AUSD of older progress is tracked on this device.</Text> : null}
+          {dueSchedules.length > 0 ? (
+            <Pressable
+              onPress={() => {
+                const first = dueSchedules[0];
+                const goal = goals.find((item) => item.id === first.goalId);
+                if (goal) openDepositFor(goal.id, first.amount);
+              }}
+              style={[styles.dueBanner, { backgroundColor: colors.primarySoft }]}
+            >
+              <View style={[styles.summaryIcon, { backgroundColor: colors.background }]}><Feather name="calendar" size={18} color={colors.primary} /></View>
+              <View style={{ flex: 1 }}>
+                <Text style={[styles.goalName, { color: colors.foreground }]}>
+                  {dueSchedules.length === 1 ? 'A scheduled save is due' : `${dueSchedules.length} scheduled saves are due`}
+                </Text>
+                <Text style={[styles.pocketMeta, { color: colors.mutedForeground }]}>
+                  {(() => {
+                    const first = dueSchedules[0];
+                    const goal = goals.find((item) => item.id === first.goalId);
+                    return `${first.amount} AUSD${goal ? ` → ${goal.name}` : ''} · tap to deposit`;
+                  })()}
+                </Text>
+              </View>
+              <Feather name="arrow-right" size={16} color={colors.primary} />
+            </Pressable>
+          ) : null}
+          {lastGiftLink ? (
+            <View style={[styles.dueBanner, { backgroundColor: colors.primarySoft }]}>
+              <View style={[styles.summaryIcon, { backgroundColor: colors.background }]}><Feather name="link" size={18} color={colors.primary} /></View>
+              <View style={{ flex: 1 }}>
+                <Text style={[styles.goalName, { color: colors.foreground }]}>Gift link ready</Text>
+                <Text numberOfLines={1} style={[styles.pocketMeta, { color: colors.mutedForeground }]}>Share it anywhere — opens the claim screen</Text>
+              </View>
+              <Pressable
+                onPress={() => { void Clipboard.setStringAsync(lastGiftLink).then(() => { setGiftCopied(true); setTimeout(() => setGiftCopied(false), 1600); }); }}
+                style={[styles.maxButton, { backgroundColor: colors.primary }]}
+              >
+                <Text style={[styles.addText, { color: colors.primaryForeground }]}>{giftCopied ? 'Copied' : 'Copy link'}</Text>
+              </Pressable>
+              <Pressable onPress={() => setLastGiftLink('')}>
+                <Feather name="x" size={15} color={colors.mutedForeground} />
+              </Pressable>
+            </View>
+          ) : null}
           {giftBalance !== null && Number(giftBalance) > 0 ? (
             <Pressable onPress={() => { setUtilityAmount(giftBalance); setActiveSheet('gifts'); }} style={[styles.giftBanner, { backgroundColor: colors.secondary }]}>
               <View style={[styles.summaryIcon, { backgroundColor: colors.background }]}><Feather name="gift" size={18} color={colors.primary} /></View>
@@ -468,6 +642,18 @@ export default function SavingsGoalsScreen() {
                   <Text style={[styles.percent, { color: colors.primary }]}>{Math.round(progress * 100)}%</Text>
                 </View>
                 <View style={[styles.track, { backgroundColor: colors.secondary }]}><View style={[styles.fill, { width: `${progress * 100}%`, backgroundColor: colors.primary }]} /></View>
+                {(() => {
+                  const streak = countStreak(depositWeeks[goal.id] ?? []);
+                  if (streak < 1) return null;
+                  return (
+                    <View style={styles.streakRow}>
+                      <Feather name="zap" size={13} color={colors.primary} />
+                      <Text style={[styles.streakText, { color: colors.mutedForeground }]}>
+                        {streak === 1 ? 'Saved this week — keep it going' : `${streak}-week saving streak`}
+                      </Text>
+                    </View>
+                  );
+                })()}
                 {goal.pocketId && pocket?.exists ? (
                   <View style={styles.contribution}>
                     {goal.localTracked ? (
@@ -512,13 +698,14 @@ export default function SavingsGoalsScreen() {
           <View style={[styles.sheet, { backgroundColor: colors.background }]}>
             <ScrollView showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled" contentContainerStyle={styles.sheetContent}>
             <View style={[styles.sheetHandle, { backgroundColor: colors.border }]} />
-            <Text style={[styles.sheetTitle, { color: colors.foreground }]}>{activeGoal ? (goalSheetMode === 'menu' ? focusedGoal?.name ?? 'Manage goal' : goalSheetMode === 'deposit' ? 'Add to your goal' : goalSheetMode === 'rate' ? 'Auto-save rate' : 'Withdraw AUSD') : 'Create a savings goal'}</Text>
-            <Text style={[styles.sheetHint, { color: colors.mutedForeground }]}>{activeGoal ? (goalSheetMode === 'menu' ? 'Manage this goal and its AUSD pocket.' : goalSheetMode === 'deposit' ? 'Move AUSD from your wallet into this pocket.' : goalSheetMode === 'rate' ? 'Choose the share of each payment to save.' : `Available in pocket: ${focusedGoal ? money(Number(pocketStates[focusedGoal.id]?.balance ?? 0)) : '0.00'} AUSD`) : 'Set a target and choose how payments can grow it.'}</Text>
+            <Text style={[styles.sheetTitle, { color: colors.foreground }]}>{activeGoal ? (goalSheetMode === 'menu' ? focusedGoal?.name ?? 'Manage goal' : goalSheetMode === 'deposit' ? 'Add to your goal' : goalSheetMode === 'rate' ? 'Auto-save rate' : goalSheetMode === 'schedule' ? 'Scheduled saves' : 'Withdraw AUSD') : 'Create a savings goal'}</Text>
+            <Text style={[styles.sheetHint, { color: colors.mutedForeground }]}>{activeGoal ? (goalSheetMode === 'menu' ? 'Manage this goal and its AUSD pocket.' : goalSheetMode === 'deposit' ? 'Move AUSD from your wallet into this pocket.' : goalSheetMode === 'rate' ? 'Choose the share of each payment to save.' : goalSheetMode === 'schedule' ? 'Set an amount and cadence. We remind you here when one is due.' : `Available in pocket: ${focusedGoal ? money(Number(pocketStates[focusedGoal.id]?.balance ?? 0)) : '0.00'} AUSD`) : 'Set a target and choose how payments can grow it.'}</Text>
             {activeGoal && goalSheetMode === 'menu' ? <View style={styles.sheetActions}>
               <SheetAction icon="plus" title="Deposit AUSD" detail="Move AUSD into this goal" color={colors} onPress={() => { setContribution(''); setGoalSheetMode('deposit'); }} />
               <SheetAction icon="arrow-up-right" title="Pay + auto-save" detail="Send AUSD and save a percentage" color={colors} onPress={() => { if (!focusedGoal?.pocketId) return; setActiveGoal(null); router.push({ pathname: '/(tabs)/send', params: { pocketId: focusedGoal.pocketId, autoSaveBps: String(pocketStates[focusedGoal.id]?.autoSaveBps ?? focusedGoal.autoSaveBps ?? 0), goalName: focusedGoal.name } }); }} />
               <SheetAction icon="percent" title="Change auto-save" detail={`${((pocketStates[focusedGoal?.id ?? '']?.autoSaveBps ?? focusedGoal?.autoSaveBps ?? 0) / 100).toFixed(2).replace(/\.?0+$/, '')}% currently`} color={colors} onPress={() => { setUtilityAmount(String((pocketStates[focusedGoal?.id ?? '']?.autoSaveBps ?? focusedGoal?.autoSaveBps ?? 0) / 100)); setGoalSheetMode('rate'); }} />
               <SheetAction icon="download" title="Withdraw" detail="Send pocket AUSD back to your wallet" color={colors} onPress={() => { setUtilityAmount(''); setGoalSheetMode('withdraw'); }} />
+              <SheetAction icon="calendar" title="Schedule saves" detail={focusedGoal && schedules.some((item) => item.goalId === focusedGoal.id && item.active) ? `${schedules.filter((item) => item.goalId === focusedGoal?.id && item.active).length} active` : 'Weekly or monthly deposits'} color={colors} onPress={() => { setScheduleAmount(''); setGoalSheetMode('schedule'); }} />
               <SheetAction icon="share-2" title="Share pocket" detail="Let someone track or fund this goal" color={colors} onPress={() => { if (focusedGoal) void sharePocket(focusedGoal); setActiveGoal(null); }} />
             </View> : null}
             {activeGoal && goalSheetMode === 'deposit' ? <>
@@ -533,6 +720,31 @@ export default function SavingsGoalsScreen() {
             {activeGoal && goalSheetMode === 'withdraw' ? <>
               <View style={styles.amountRow}><View style={styles.amountField}><Field label="Amount · AUSD" value={utilityAmount} onChangeText={setUtilityAmount} placeholder="0.00" keyboardType="decimal-pad" /></View><Pressable onPress={() => setUtilityAmount(String(pocketStates[focusedGoal?.id ?? '']?.balance ?? '0'))} style={[styles.maxButton, { backgroundColor: colors.secondary }]}><Text style={[styles.addText, { color: colors.primary }]}>Max</Text></Pressable></View>
               <PrimaryButton label="Review withdrawal" icon="download" loading={saving} onPress={() => Alert.alert('Review withdrawal', `${utilityAmount || '0.00'} AUSD will be sent to your wallet:\n${account?.address ?? ''}`, [{ text: 'Cancel', style: 'cancel' }, { text: 'Confirm with passkey', onPress: () => void withdrawFromGoal() }])} />
+            </> : null}
+            {activeGoal && goalSheetMode === 'schedule' ? <>
+              <Field label="Amount · AUSD" value={scheduleAmount} onChangeText={setScheduleAmount} placeholder="5.00" keyboardType="decimal-pad" />
+              <View style={styles.choiceList}>
+                {(['weekly', 'monthly'] as ScheduleFrequency[]).map((option) => (
+                  <Pressable key={option} onPress={() => setScheduleFrequency(option)} style={[styles.choice, { borderWidth: 0, backgroundColor: scheduleFrequency === option ? colors.primary : colors.secondary }]}>
+                    <Text style={[styles.addText, { color: scheduleFrequency === option ? colors.primaryForeground : colors.foreground }]}>{option === 'weekly' ? 'Weekly' : 'Monthly'}</Text>
+                  </Pressable>
+                ))}
+              </View>
+              <PrimaryButton label="Save schedule" icon="calendar" loading={saving} onPress={() => void createSchedule()} />
+              {focusedSchedules.length ? focusedSchedules.map((item) => (
+                <View key={item.id} style={styles.sharedUtilityRow}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={[styles.goalName, { color: colors.foreground }]}>{item.amount} AUSD · {item.frequency}</Text>
+                    <Text style={[styles.pocketMeta, { color: colors.mutedForeground }]}>{describeSchedule(item)}</Text>
+                  </View>
+                  <Pressable onPress={() => void updateSchedule(item.id, { active: !item.active }).then(setSchedules)}>
+                    <Text style={[styles.addText, { color: colors.primary }]}>{item.active ? 'Pause' : 'Resume'}</Text>
+                  </Pressable>
+                  <Pressable onPress={() => void removeSchedule(item.id).then(setSchedules)}>
+                    <Text style={[styles.addText, { color: colors.destructive }]}>Remove</Text>
+                  </Pressable>
+                </View>
+              )) : <Text style={[styles.empty, { color: colors.mutedForeground }]}>No schedules for this goal yet.</Text>}
             </> : null}
             {!activeGoal ? <>
               <Field label="Goal name" value={name} onChangeText={setName} placeholder="A new laptop" autoCapitalize="sentences" />
@@ -586,6 +798,20 @@ export default function SavingsGoalsScreen() {
           </View>
         </View>
       </Modal>
+      <Modal visible={celebration !== null} transparent animationType="fade" onRequestClose={() => setCelebration(null)}>
+        <View style={styles.celebrateBackdrop}>
+          <View style={[styles.celebrateCard, { backgroundColor: colors.background }]}>
+            <View style={[styles.celebrateIcon, { backgroundColor: colors.primarySoft }]}>
+              <Feather name="award" size={26} color={colors.primary} />
+            </View>
+            <Text style={[styles.celebratePct, { color: colors.primary }]}>{celebration?.pct}%</Text>
+            <Text style={[styles.sheetTitle, { color: colors.foreground, textAlign: 'center' }]}>{celebration?.name} is taking shape</Text>
+            <Text style={[styles.sheetHint, { color: colors.mutedForeground, textAlign: 'center' }]}>You saved your way to {celebration?.pct}% of this goal. Keep the streak alive.</Text>
+            <PrimaryButton label="Share progress" icon="share-2" onPress={() => void shareGoalMilestone()} />
+            <Pressable onPress={() => setCelebration(null)} style={styles.sheetCancel}><Text style={[styles.addText, { color: colors.mutedForeground }]}>Keep saving</Text></Pressable>
+          </View>
+        </View>
+      </Modal>
     </Page>
   );
 }
@@ -608,6 +834,7 @@ const styles = StyleSheet.create({
   actionLabel: { fontSize: 10, fontFamily: 'Inter_600SemiBold' },
   localNote: { fontSize: 11, lineHeight: 16, paddingHorizontal: 3 },
   giftBanner: { flexDirection: 'row', alignItems: 'center', gap: 11, padding: 14, borderRadius: 18 },
+  dueBanner: { flexDirection: 'row', alignItems: 'center', gap: 11, padding: 14, borderRadius: 18 },
   giftAmount: { fontSize: 13, fontFamily: 'Inter_700Bold' },
   sharedCard: { gap: 13, padding: 16 },
   sharedRow: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 8 },
@@ -625,6 +852,12 @@ const styles = StyleSheet.create({
   manageButton: { minHeight: 34, flexDirection: 'row', alignItems: 'center', gap: 5, borderRadius: 11, paddingHorizontal: 10 },
   track: { height: 8, borderRadius: 8, overflow: 'hidden' },
   fill: { height: '100%', borderRadius: 8 },
+  streakRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 2 },
+  streakText: { fontSize: 11, fontFamily: 'Inter_600SemiBold' },
+  celebrateBackdrop: { flex: 1, justifyContent: 'center', padding: 32, backgroundColor: 'rgba(12,15,20,0.5)' },
+  celebrateCard: { borderRadius: 24, padding: 26, gap: 12, alignItems: 'center' },
+  celebrateIcon: { width: 64, height: 64, borderRadius: 22, alignItems: 'center', justifyContent: 'center' },
+  celebratePct: { fontSize: 34, fontFamily: 'Inter_700Bold' },
   addButton: { alignSelf: 'flex-start', minHeight: 36, flexDirection: 'row', alignItems: 'center', gap: 6 },
   actionChip: { minHeight: 36, flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 11, borderRadius: 12 },
   addText: { fontSize: 13, fontFamily: 'Inter_600SemiBold' },

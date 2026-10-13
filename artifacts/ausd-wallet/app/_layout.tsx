@@ -45,6 +45,7 @@ function RootLayoutNav() {
       <Stack.Screen name="savings-goals" options={{ headerShown: false, animation: 'slide_from_right' }} />
       <Stack.Screen name="contacts" options={{ headerShown: false, animation: 'slide_from_right' }} />
       <Stack.Screen name="scan" options={{ headerShown: false, animation: 'slide_from_right' }} />
+      <Stack.Screen name="gift/claim" options={{ headerShown: false, animation: 'slide_from_right' }} />
     </Stack>
   );
 }

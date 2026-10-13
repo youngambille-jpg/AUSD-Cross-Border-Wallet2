@@ -6,9 +6,13 @@ changes except where noted.
 
 ---
 
-## 3. Round-ups (spare-change saving)
+## 3. Round-ups (spare-change saving) — DONE
 
 Save the round-up of every payment: pay 9.20 AUSD → 0.80 auto-saved.
+Implemented via Off/%/Round-up segmented control in the send sheet,
+`calculateRoundUpBreakdown` + `payWithRoundUpSponsored` (transfer + deposit
+batched in one sponsored UserOp — no contract change), and
+`mode: 'autosave-roundup'` in review. Whole amounts fall back with a hint.
 
 ### UI
 - Send sheet (`app/send.tsx`): third save option next to the pocket toggle —
@@ -28,9 +32,13 @@ Save the round-up of every payment: pay 9.20 AUSD → 0.80 auto-saved.
 
 ---
 
-## 4. Streaks, milestones, shareable goal cards
+## 4. Streaks, milestones, shareable goal cards — DONE
 
-Pure client-side engagement over existing on-chain balances. No contract change.
+Implemented in `services/streaks.ts` (ISO week keys, consecutive-week count,
+persisted deposit weeks + one-time milestone flags) and
+`app/savings-goals.tsx` (streak row on goal cards, milestone celebration
+modal at 25/50/75/100% with share-progress, deposit recording on pocket
+deposits and gift allocations). Fully client-side, no contract change.
 
 ### UI
 - Savings home (`app/savings-goals.tsx`): streak flame + count on each goal
@@ -51,9 +59,12 @@ Pure client-side engagement over existing on-chain balances. No contract change.
 
 ---
 
-## 5. Scheduled saves (weekly auto-deposit)
+## 5. Scheduled saves (weekly auto-deposit) — DONE (Phase 1)
 
-Salary-style saving, not just payment-triggered.
+Implemented in `services/schedules.ts` (weekly/monthly cadence, due-date
+roll-forward, pause/resume/remove, AsyncStorage persistence) and
+`app/savings-goals.tsx` (Schedule sheet per goal, due banner with one-tap
+deposit prefill, auto roll-forward after each deposit). In-app remindersonly — push notifications and true automation (Phase 2) stay parked.
 
 ### UI
 - Goal sheet: "Schedule" section — amount + weekly/monthly picker + start
@@ -73,10 +84,14 @@ Salary-style saving, not just payment-triggered.
 
 ---
 
-## 6. Gift claim links (viral growth)
+## 6. Gift claim links (viral growth) — DONE (address-bound v1)
 
-Today both sides need the app. Links fix that: share → landing → fresh
-passkey wallet → funds appear.
+Implemented: `app/gift/claim.tsx` (public route — deliberately outside the
+auth guard) verifies the linked address's `unallocatedGiftBalance` on-chain
+and offers one-tap withdraw; "Copy link" banner after each gift
+(`services/gift-links.ts` builder); Scan parses gift links and routes to
+claim. Stranger claims (recipient has no wallet yet) still need the
+secret-escrow contract change — parked as Phase 2.
 
 ### UI
 - New `app/gift/[code].tsx` route: gift art card (amount, donor name),

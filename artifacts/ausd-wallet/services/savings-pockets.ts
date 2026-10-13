@@ -62,6 +62,16 @@ const tokenAbi = [
     ],
     outputs: [{ type: 'bool' }],
   },
+  {
+    type: 'function',
+    name: 'transfer',
+    stateMutability: 'nonpayable',
+    inputs: [
+      { name: 'to', type: 'address' },
+      { name: 'amount', type: 'uint256' },
+    ],
+    outputs: [{ type: 'bool' }],
+  },
 ] as const;
 
 const pocketsAbi = [
@@ -479,6 +489,99 @@ export async function payWithAutoSaveSponsored(
       abi: pocketsAbi,
       functionName: 'payWithAutoSave',
       args: [pocketId, recipient as Address, paymentRaw],
+    }),
+  });
+  const result = await sendSponsoredCalls(account, calls);
+  return {
+    ...result,
+    ...breakdown,
+    pocket: {
+      pocketId,
+      balance: formatUnits(parseUnits(pocket.balance, 6) + savedRaw, 6),
+      autoSaveBps: pocket.autoSaveBps,
+      exists: true,
+    },
+  };
+}
+
+export interface RoundUpBreakdown {
+  paymentAmount: string;
+  savedAmount: string;
+  totalDebit: string;
+}
+
+/**
+ * Rounds a payment up to the next whole AUSD and saves the difference.
+ * Returns null when the payment is already whole (nothing to save).
+ */
+export function calculateRoundUpBreakdown(paymentAmount: string): RoundUpBreakdown | null {
+  let paymentRaw: bigint;
+  try {
+    paymentRaw = parseUnits(paymentAmount, 6);
+  } catch {
+    throw new Error('Enter a valid AUSD payment with at most six decimal places.');
+  }
+  if (paymentRaw <= 0n) throw new Error('Enter an AUSD payment greater than zero.');
+  const unit = 10n ** 6n;
+  const remainder = paymentRaw % unit;
+  if (remainder === 0n) return null;
+  const savedRaw = unit - remainder;
+  return {
+    paymentAmount: formatUnits(paymentRaw, 6),
+    savedAmount: formatUnits(savedRaw, 6),
+    totalDebit: formatUnits(paymentRaw + savedRaw, 6),
+  };
+}
+
+/**
+ * Sends a payment and deposits its round-up into a pocket in one sponsored
+ * batch (direct transfer + pocket deposit — atomic inside the UserOperation).
+ * Unlike payWithAutoSaveSponsored this needs no pocket rate: the saved amount
+ * is explicit, so any active pocket works.
+ */
+export async function payWithRoundUpSponsored(
+  account: MeraPasskeyProfile,
+  recipient: string,
+  pocketId: string,
+  paymentAmount: string,
+) {
+  if (!isAddress(recipient, { strict: false })) throw new Error('Enter a valid recipient wallet address.');
+  if (recipient.toLowerCase() === account.address.toLowerCase()) {
+    throw new Error('Choose a recipient other than your own smart account.');
+  }
+  assertPocketId(pocketId);
+  const breakdown = calculateRoundUpBreakdown(paymentAmount);
+  if (!breakdown) throw new Error('This payment is already a whole amount — there is nothing to round up.');
+  await assertSavingsContract();
+  const pocket = await getSavingsPocket(account.address, pocketId);
+  if (!pocket.exists) throw new Error('This goal pocket is not active on Monad. Return to Savings Goals and activate it.');
+  const paymentRaw = parseUnits(breakdown.paymentAmount, 6);
+  const savedRaw = parseUnits(breakdown.savedAmount, 6);
+  const totalRaw = paymentRaw + savedRaw;
+  const walletBalance = await publicClient.readContract({
+    address: MONAD_TESTNET.ausdAddress,
+    abi: tokenAbi,
+    functionName: 'balanceOf',
+    args: [account.address as Address],
+  });
+  if (walletBalance < totalRaw) {
+    throw new Error(`You need ${breakdown.totalDebit} AUSD for the payment and round-up; the account has ${formatUnits(walletBalance, 6)} AUSD.`);
+  }
+  const calls = await getAllowanceCalls(account.address as Address, totalRaw);
+  calls.push({
+    to: MONAD_TESTNET.ausdAddress,
+    data: encodeFunctionData({
+      abi: tokenAbi,
+      functionName: 'transfer',
+      args: [recipient as Address, paymentRaw],
+    }),
+  });
+  calls.push({
+    to: SAVINGS_POCKETS_ADDRESS,
+    data: encodeFunctionData({
+      abi: pocketsAbi,
+      functionName: 'deposit',
+      args: [pocketId, savedRaw],
     }),
   });
   const result = await sendSponsoredCalls(account, calls);

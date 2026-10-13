@@ -62,7 +62,27 @@ function readEip681(value: string) {
   }
 }
 
+function readGiftRequest(value: string) {
+  try {
+    const url = new URL(value);
+    if (url.protocol !== 'ausd-wallet:') return null;
+    if (url.pathname.replace(/^\/+/, '') !== 'gift/claim') return null;
+    const recipient = url.searchParams.get('recipient')?.trim() ?? '';
+    if (!isAddress(recipient, { strict: false })) return null;
+    return {
+      recipient,
+      amount: url.searchParams.get('amount')?.trim() ?? '',
+      tx: url.searchParams.get('tx')?.trim() ?? '',
+      donor: url.searchParams.get('donor')?.trim() ?? '',
+    };
+  } catch {
+    return null;
+  }
+}
+
 function readPaymentRequest(value: string) {
+  const gift = readGiftRequest(value);
+  if (gift) return { ...gift, gift: '1' };
   const internal = readInternalRequest(value);
   if (internal) return internal;
   const eip = readEip681(value);
@@ -83,10 +103,16 @@ export default function ScanScreen() {
     if (scanned.current) return;
     const request = readPaymentRequest(result.data);
     if (!request) {
-      setError('This QR code is not a valid payment request. It should be an AUSD Wallet link, an EIP-681 request, or a wallet address.');
+      setError('This QR code is not a valid payment request. It should be an AUSD Wallet link, a gift link, an EIP-681 request, or a wallet address.');
       return;
     }
     scanned.current = true;
+    if ('gift' in request) {
+      const { gift: _gift, ...giftParams } = request as { gift: string; recipient: string; amount: string; tx: string; donor: string };
+      void _gift;
+      router.replace({ pathname: '/gift/claim', params: giftParams });
+      return;
+    }
     router.replace({ pathname: '/send', params: request });
   }
 
@@ -96,7 +122,7 @@ export default function ScanScreen() {
       <View style={styles.heading}>
         <Eyebrow>SEND TOKEN</Eyebrow>
         <Title>Scan a payment request.</Title>
-        <Text style={[styles.subtitle, { color: colors.mutedForeground }]}>AUSD Wallet links, EIP-681 requests, and plain wallet addresses are accepted.</Text>
+        <Text style={[styles.subtitle, { color: colors.mutedForeground }]}>AUSD Wallet links, gift links, EIP-681 requests, and plain wallet addresses are accepted.</Text>
       </View>
 
       {!permission ? (

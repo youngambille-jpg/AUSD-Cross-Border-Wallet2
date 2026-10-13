@@ -22,7 +22,7 @@ import { useWallet } from '@/state/wallet-context';
 import { getTokenBalance } from '@/services/passkey';
 import { loadContacts, type WalletContact } from '@/services/contacts';
 import { loadSavingsGoals, type SavingsGoal } from '@/services/savings-goals';
-import { calculateAutoSaveBreakdown } from '@/services/savings-pockets';
+import { calculateAutoSaveBreakdown, calculateRoundUpBreakdown } from '@/services/savings-pockets';
 import { simulateTokenSwap, type SettlementQuote } from '@/services/settlement';
 import { TRANSFER_TOKENS, WALLET_TOKENS, type WalletToken } from '@/services/tokens';
 import { PrimaryButton } from '@/components/Primitives';
@@ -57,7 +57,7 @@ export default function SendDrawer() {
   const [contacts, setContacts] = useState<WalletContact[]>([]);
   const [contactsLoading, setContactsLoading] = useState(false);
   const [contactsError, setContactsError] = useState('');
-  const [saveWithPocket, setSaveWithPocket] = useState(false);
+  const [saveMode, setSaveMode] = useState<'off' | 'pct' | 'roundup'>('off');
   const [pockets, setPockets] = useState<SavingsGoal[]>([]);
   const [pocketsLoading, setPocketsLoading] = useState(false);
   const [pocketsError, setPocketsError] = useState('');
@@ -139,16 +139,20 @@ export default function SendDrawer() {
   const onchainPockets = useMemo(() => pockets.filter((goal) => Boolean(goal.pocketId)), [pockets]);
   const selectedPocket = onchainPockets.find((goal) => goal.id === selectedPocketId) ?? null;
   const selectedRateBps = selectedPocket?.autoSaveBps ?? 0;
-  const autoSaveOn = saveWithPocket && sendMode === 'direct' && token === 'AUSD';
+  const saveActive = saveMode !== 'off' && sendMode === 'direct' && token === 'AUSD';
+  const autoSaveOn = saveActive && saveMode === 'pct';
+  const roundUpOn = saveActive && saveMode === 'roundup';
   const saveBreakdown = useMemo(() => {
-    if (!autoSaveOn || !selectedPocket || selectedRateBps <= 0) return null;
+    if (!saveActive || !selectedPocket) return null;
     if (!/^\d+(\.\d{1,6})?$/.test(amount) || Number(amount) <= 0) return null;
     try {
+      if (saveMode === 'roundup') return calculateRoundUpBreakdown(amount);
+      if (selectedRateBps <= 0) return null;
       return calculateAutoSaveBreakdown(amount, selectedRateBps);
     } catch {
       return null;
     }
-  }, [autoSaveOn, selectedPocket, selectedRateBps, amount]);
+  }, [saveActive, saveMode, selectedPocket, selectedRateBps, amount]);
   const totalDebit = saveBreakdown ? Number(saveBreakdown.totalDebit) : parsedAmount;
 
   useEffect(() => {
@@ -171,21 +175,17 @@ export default function SendDrawer() {
     return () => { active = false; clearTimeout(timer); };
   }, [amount, sendMode, settlementOutput, activeDecimals, profile?.address, profile?.mode]);
 
-  async function toggleSaveWithPocket() {
-    if (saveWithPocket) {
-      setSaveWithPocket(false);
-      return;
-    }
+  async function ensureSavePockets() {
     setPocketsError('');
     if (!account) {
-      setPocketsError('Create a Mera passkey wallet to use pay + auto-save.');
-      return;
+      setPocketsError('Create a Mera passkey wallet to use pay + save.');
+      return false;
     }
     if (token !== 'AUSD' || sendMode !== 'direct') {
-      setPocketsError('Pay + auto-save works with direct AUSD transfers.');
-      return;
+      setPocketsError('Pay + save works with direct AUSD transfers.');
+      return false;
     }
-    setSaveWithPocket(true);
+    if (onchainPockets.length) return true;
     setPocketsLoading(true);
     try {
       const goals = await loadSavingsGoals(account);
@@ -193,15 +193,23 @@ export default function SendDrawer() {
       setPockets(active);
       if (!active.length) {
         setPocketsError('No active pockets yet. Create one in Savings first.');
-      } else if (!selectedPocketId || !active.some((goal) => goal.id === selectedPocketId)) {
-        const first = active[0];
-        setSelectedPocketId(first.id);
+        return false;
       }
+      if (!selectedPocketId || !active.some((goal) => goal.id === selectedPocketId)) {
+        setSelectedPocketId(active[0].id);
+      }
+      return true;
     } catch (caught) {
       setPocketsError(caught instanceof Error ? caught.message : 'Could not unlock your savings plan.');
+      return false;
     } finally {
       setPocketsLoading(false);
     }
+  }
+
+  function setSaveOption(next: 'off' | 'pct' | 'roundup') {
+    setSaveMode(next);
+    if (next !== 'off') void ensureSavePockets();
   }
   async function openContacts() {    setContactsError('');
     setContactsOpen(true);
@@ -245,7 +253,7 @@ export default function SendDrawer() {
     setToken(next);
     setAmount('');
     setError('');
-    if (next !== 'AUSD') setSaveWithPocket(false);
+    if (next !== 'AUSD') setSaveMode('off');
     setTokenModalOpen(false);
   }
 
@@ -289,6 +297,24 @@ export default function SendDrawer() {
         params: {
           mode: 'autosave', recipient: recipient.trim(), recipientName, amount, token: 'AUSD',
           pocketId: selectedPocket.pocketId!, goalName: selectedPocket.name, autoSaveBps: String(selectedRateBps),
+        },
+      });
+      return;
+    }
+    if (roundUpOn) {
+      if (!selectedPocket?.pocketId) {
+        setError('Choose an active savings pocket first.');
+        return;
+      }
+      if (!saveBreakdown) {
+        setError('Round-ups need a non-whole amount — this payment is already exact.');
+        return;
+      }
+      router.push({
+        pathname: '/review',
+        params: {
+          mode: 'autosave-roundup', recipient: recipient.trim(), recipientName, amount, token: 'AUSD',
+          pocketId: selectedPocket.pocketId!, goalName: selectedPocket.name,
         },
       });
       return;
@@ -366,7 +392,7 @@ export default function SendDrawer() {
               <Pressable onPress={() => { setSendMode('direct'); setError(''); }} style={[styles.modeOption, sendMode === 'direct' && { backgroundColor: colors.background }]}>
                 <Text style={[styles.modeText, { color: sendMode === 'direct' ? colors.foreground : colors.mutedForeground }]}>Token transfer</Text>
               </Pressable>
-              <Pressable onPress={() => { setSendMode('settlement'); setSaveWithPocket(false); setError(''); }} style={[styles.modeOption, sendMode === 'settlement' && { backgroundColor: colors.background }]}>
+              <Pressable onPress={() => { setSendMode('settlement'); setSaveMode('off'); setError(''); }} style={[styles.modeOption, sendMode === 'settlement' && { backgroundColor: colors.background }]}>
                 <Text style={[styles.modeText, { color: sendMode === 'settlement' ? colors.foreground : colors.mutedForeground }]}>Cross-border</Text>
               </Pressable>
             </View>
@@ -444,31 +470,32 @@ export default function SendDrawer() {
 
             {sendMode === 'direct' && token === 'AUSD' ? (
               <View style={styles.saveBlock}>
-                <Pressable
-                  accessibilityRole="checkbox"
-                  accessibilityState={{ checked: saveWithPocket }}
-                  accessibilityLabel="Pay with auto-save"
-                  onPress={() => void toggleSaveWithPocket()}
-                  style={[styles.saveToggle, { backgroundColor: colors.secondary }]}
-                >
-                  <View style={[styles.checkbox, { borderColor: saveWithPocket ? colors.primary : colors.mutedForeground, backgroundColor: saveWithPocket ? colors.primary : 'transparent' }]}>
-                    {saveWithPocket ? <Feather name="check" size={13} color={colors.primaryForeground} /> : null}
-                  </View>
-                  <View style={{ flex: 1 }}>
-                    <Text style={[styles.saveTitle, { color: colors.foreground }]}>
-                      {saveWithPocket && selectedPocket
-                        ? `Save ${selectedRateBps / 100}% to ${selectedPocket.name}`
-                        : 'Pay + auto-save'}
-                    </Text>
-                    <Text style={[styles.saveSub, { color: colors.mutedForeground }]}>
-                      {saveWithPocket ? 'Split shown below · verified again at review' : 'Skim a % into a savings pocket'}
-                    </Text>
-                  </View>
-                  {saveWithPocket ? <Feather name="chevron-down" size={16} color={colors.mutedForeground} /> : null}
-                </Pressable>
+                <View style={[styles.saveSegment, { backgroundColor: colors.secondary }]}>
+                  {(['off', 'pct', 'roundup'] as const).map((option) => (
+                    <Pressable
+                      key={option}
+                      accessibilityRole="button"
+                      accessibilityState={{ selected: saveMode === option }}
+                      accessibilityLabel={option === 'off' ? 'No saving' : option === 'pct' ? 'Save a percentage' : 'Round up spare change'}
+                      onPress={() => setSaveOption(option)}
+                      style={[styles.saveSegmentOption, saveMode === option && { backgroundColor: colors.background }]}
+                    >
+                      <Text style={[styles.modeText, { color: saveMode === option ? colors.foreground : colors.mutedForeground }]}>
+                        {option === 'off' ? 'No save' : option === 'pct' ? '% Save' : 'Round-up'}
+                      </Text>
+                    </Pressable>
+                  ))}
+                </View>
+                {saveActive && selectedPocket ? (
+                  <Text style={[styles.saveSub, { color: colors.mutedForeground }]}>
+                    {saveMode === 'pct'
+                      ? `Skims ${selectedRateBps / 100}% into ${selectedPocket.name} · verified again at review`
+                      : `Rounds up into ${selectedPocket.name} · verified again at review`}
+                  </Text>
+                ) : null}
                 {pocketsLoading ? <Text style={[styles.saveSub, { color: colors.mutedForeground }]}>Unlocking your savings plan…</Text> : null}
                 {pocketsError ? <Text style={[styles.fieldError, { color: colors.destructive }]}>{pocketsError}</Text> : null}
-                {saveWithPocket && !pocketsLoading && onchainPockets.length > 0 ? (
+                {saveActive && !pocketsLoading && onchainPockets.length > 0 ? (
                   <Pressable
                     accessibilityRole="button"
                     accessibilityLabel="Choose savings pocket"
@@ -478,9 +505,13 @@ export default function SendDrawer() {
                     <Feather name="target" size={15} color={colors.primary} />
                     <View style={{ flex: 1 }}>
                       <Text style={[styles.tokenPickerTitle, { color: colors.foreground }]}>
-                        {selectedPocket ? `${selectedPocket.name} · ${selectedRateBps / 100}%` : 'Choose pocket'}
+                        {selectedPocket
+                          ? saveMode === 'pct'
+                            ? `${selectedPocket.name} · ${selectedRateBps / 100}%`
+                            : selectedPocket.name
+                          : 'Choose pocket'}
                       </Text>
-                      <Text style={[styles.tokenPickerSub, { color: colors.mutedForeground }]}>Change rates in Savings</Text>
+                      <Text style={[styles.tokenPickerSub, { color: colors.mutedForeground }]}>{saveMode === 'pct' ? 'Change rates in Savings' : 'Round-up target'}</Text>
                     </View>
                     <Feather name="chevron-down" size={16} color={colors.mutedForeground} />
                   </Pressable>
@@ -492,7 +523,7 @@ export default function SendDrawer() {
                       <Text style={[styles.splitValue, { color: colors.foreground }]}>{money(Number(saveBreakdown.paymentAmount))} AUSD</Text>
                     </View>
                     <View style={styles.splitLine}>
-                      <Text style={[styles.splitLabel, { color: colors.mutedForeground }]}>AUTO-SAVE</Text>
+                      <Text style={[styles.splitLabel, { color: colors.mutedForeground }]}>{saveMode === 'roundup' ? 'ROUND-UP' : 'AUTO-SAVE'}</Text>
                       <Text style={[styles.splitValue, { color: colors.primary }]}>+{money(Number(saveBreakdown.savedAmount))} AUSD</Text>
                     </View>
                     <View style={styles.splitLine}>
@@ -500,6 +531,9 @@ export default function SendDrawer() {
                       <Text style={[styles.splitValue, { color: colors.foreground }]}>{money(Number(saveBreakdown.totalDebit))} AUSD</Text>
                     </View>
                   </View>
+                ) : null}
+                {saveActive && saveMode === 'roundup' && !saveBreakdown && /^\d+(\.\d{1,6})?$/.test(amount) ? (
+                  <Text style={[styles.saveSub, { color: colors.mutedForeground }]}>Whole amount — nothing to round up. Add cents to save the change.</Text>
                 ) : null}
               </View>
             ) : null}
@@ -578,7 +612,7 @@ export default function SendDrawer() {
             </View>
             {sendMode === 'settlement' ? <Text style={[styles.firstTimeNote, { color: colors.mutedForeground }]}>First swap may include one-time testnet access and token approval.</Text> : null}
             {error ? <Text style={[styles.error, { color: colors.destructive }]}>{error}</Text> : null}
-            <PrimaryButton label={autoSaveOn && selectedPocket ? 'Review payment + save' : sendMode === 'direct' ? 'Review transfer' : 'Review settlement'} icon="arrow-right" onPress={continueToReview} disabled={sendMode === 'settlement' && (!quote || quoteLoading || !!quoteError)} />
+            <PrimaryButton label={(autoSaveOn || roundUpOn) && selectedPocket ? 'Review payment + save' : sendMode === 'direct' ? 'Review transfer' : 'Review settlement'} icon="arrow-right" onPress={continueToReview} disabled={sendMode === 'settlement' && (!quote || quoteLoading || !!quoteError)} />
           </ScrollView>
         </View>
       </KeyboardAvoidingView>
@@ -714,9 +748,8 @@ const styles = StyleSheet.create({
   quickText: { fontSize: 11, fontFamily: 'Inter_700Bold' },
   recipientBlock: { gap: 8 },
   saveBlock: { gap: 8 },
-  saveToggle: { borderRadius: 14, padding: 12, flexDirection: 'row', alignItems: 'center', gap: 10 },
-  checkbox: { width: 22, height: 22, borderRadius: 7, borderWidth: 1.5, alignItems: 'center', justifyContent: 'center' },
-  saveTitle: { fontSize: 13, fontFamily: 'Inter_600SemiBold' },
+  saveSegment: { borderRadius: 14, padding: 4, flexDirection: 'row', gap: 4 },
+  saveSegmentOption: { flex: 1, minHeight: 38, borderRadius: 11, alignItems: 'center', justifyContent: 'center' },
   saveSub: { fontSize: 11, marginTop: 2, fontFamily: 'Inter_400Regular' },
   pocketPicker: { borderRadius: 14, padding: 12, flexDirection: 'row', alignItems: 'center', gap: 10 },
   saveSplit: { borderRadius: 14, padding: 12, gap: 8 },

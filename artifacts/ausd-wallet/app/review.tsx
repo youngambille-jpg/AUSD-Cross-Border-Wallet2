@@ -12,7 +12,9 @@ import {
 } from '@/services/passkey';
 import {
   calculateAutoSaveBreakdown,
+  calculateRoundUpBreakdown,
   payWithAutoSaveSponsored,
+  payWithRoundUpSponsored,
 } from '@/services/savings-pockets';
 import { MONAD_TESTNET } from '@/services/settlement';
 import { getWalletToken, WALLET_TOKENS } from '@/services/tokens';
@@ -46,7 +48,8 @@ export default function ReviewScreen() {
   const swapOnly = params.mode === 'agora-swap' || tokenSwap;
   const inputToken = getWalletToken(params.inputToken, 'AUSD');
   const outputToken = getWalletToken(params.outputToken, tokenSwap ? 'USDC' : 'CTK');
-  const autoSave = params.mode === 'autosave';
+  const autoSave = params.mode === 'autosave' || params.mode === 'autosave-roundup';
+  const roundUp = params.mode === 'autosave-roundup';
   const sendToken = autoSave ? 'AUSD' : settlement ? inputToken : getWalletToken(params.token, 'AUSD');
   const pocketId = typeof params.pocketId === 'string' ? params.pocketId : '';
   const goalName = typeof params.goalName === 'string' ? params.goalName : '';
@@ -54,7 +57,9 @@ export default function ReviewScreen() {
   let autoSaveBreakdown: ReturnType<typeof calculateAutoSaveBreakdown> | null = null;
   if (autoSave && Number.isFinite(amount) && amount > 0) {
     try {
-      autoSaveBreakdown = calculateAutoSaveBreakdown(String(params.amount), autoSaveBps);
+      autoSaveBreakdown = roundUp
+        ? calculateRoundUpBreakdown(String(params.amount))
+        : calculateAutoSaveBreakdown(String(params.amount), autoSaveBps);
     } catch {
       autoSaveBreakdown = null;
     }
@@ -104,7 +109,9 @@ export default function ReviewScreen() {
         throw new Error('The reviewed savings pocket details are missing or invalid. Return to the send form and review again.');
       }
       const result = autoSave
-        ? await payWithAutoSaveSponsored(account, recipient, pocketId, autoSaveBps, String(params.amount))
+        ? roundUp
+          ? await payWithRoundUpSponsored(account, recipient, pocketId, String(params.amount))
+          : await payWithAutoSaveSponsored(account, recipient, pocketId, autoSaveBps, String(params.amount))
         : settlement
           ? await sendSponsoredInstantSettlementSwap(account, recipient, swapOnly ? String(params.swapAmount ?? params.amount) : String(params.amount), {
             pairAddress: typeof params.pairAddress === 'string' ? params.pairAddress : '',
@@ -191,7 +198,7 @@ export default function ReviewScreen() {
     <Page contentStyle={styles.page}>
       <BackButton onPress={() => router.back()} />
       <View style={styles.heading}>
-        <Eyebrow>{autoSave ? 'PAYMENT + AUTO-SAVE' : settlement ? 'AGORA INSTANT SETTLEMENT' : 'FINAL CHECK'}</Eyebrow>
+        <Eyebrow>{autoSave ? (roundUp ? 'PAYMENT + ROUND-UP' : 'PAYMENT + AUTO-SAVE') : settlement ? 'AGORA INSTANT SETTLEMENT' : 'FINAL CHECK'}</Eyebrow>
         <Title>{autoSave ? 'Review payment + savings' : swapOnly ? 'Review swap' : settlement ? 'Review payout' : 'Review send'}</Title>
       </View>
       <Card style={styles.summaryCard}>
@@ -205,7 +212,7 @@ export default function ReviewScreen() {
           <>
             <View style={[styles.rule, { backgroundColor: colors.border }]} />
             <View style={styles.summaryLine}>
-              <Text style={[styles.metaLabel, { color: colors.mutedForeground }]}>AUTO-SAVE · {autoSaveBps / 100}% TO {goalName.toUpperCase()}</Text>
+              <Text style={[styles.metaLabel, { color: colors.mutedForeground }]}>{roundUp ? `ROUND-UP TO ${goalName.toUpperCase()}` : `AUTO-SAVE · ${autoSaveBps / 100}% TO ${goalName.toUpperCase()}`}</Text>
               <Text style={[styles.outputValue, { color: colors.foreground }]}>
                 +{Number(autoSaveBreakdown.savedAmount).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 6 })} AUSD
               </Text>
