@@ -32,13 +32,29 @@
    - [ ] Add enforced withdrawal/lock rules on-chain only if product requirements call for them.
 3. [ ] Add stablecoin swaps on Monad with a quote, minimum received amount, and clear confirmation.
    - [x] Add the Agora AUSD-to-CTK Monad testnet swap with a quote, minimum output, and confirmation review.
-   - [ ] Add a stablecoin-to-stablecoin swap after supported Monad liquidity is verified.
+   - [ ] Add a stablecoin-to-stablecoin swap after supported Monad liquidity is verified. (Verified live: factory lists only the CTK/AUSD pair — no AUSD/USDC pool. Stablecoin tab now discovers pools via getAllPairData and shows a retryable empty state until Agora deploys one.)
+   - [x] Verify the resolved AUSD/CTK pair matches Agora's published Monad testnet deployment (0x1Aa8…b0ae); quotes now check pool reserves and display the pair fixed price from getPrice.
 4. [x] Add Aurora Intents for cross-chain deposits into Monad, with route quotes and transfer status.
 5. [ ] Extend Envio activity indexing for supported tokens and savings accounts.
    - [x] Index AUSD and CTK token transfers.
    - [ ] Index SavingsPockets events and expose pocket activity.
 6. [x] Add reusable in-app contacts for transfers and gift payments, with recipient confirmation before signing.
    - [ ] Extend contacts to bill splits and tips.
+
+## Transfer / Swap / Receive Polish
+
+1. [x] Transfer screen rebuild (`app/send.tsx` + `app/review.tsx` + `app/scan.tsx`).
+   - [x] Token dropdown with live balances for all sendable tokens (not pills).
+   - [x] Recipient contacts picker + scan button + inline address validation.
+   - [x] Quick amounts (25% / 50% / MAX) and correct decimals per token.
+   - [x] Settlement output selector (CTK / USDC) with live quote.
+   - [x] Review shows minimum received + quote age/expiry + two-stage pending state.
+   - [x] Scan accepts CTK.
+2. [x] Swap stablecoin dropdowns + invert + slippage/min-received.
+3. [x] Receive EIP-681 link + custom tokens.
+4. [x] Activity pull-refresh + filters/search.
+5. [x] Portfolio hygiene — remove/hide custom asset, faucet link, sponsorship banner.
+6. [x] Agora faucet claim — one-tap 10,000 AUSD claim from 0xd236…ee6C via sponsored UserOp with max-holdings pre-check (verified live on Monad testnet).
 
 ## Product Focus
 

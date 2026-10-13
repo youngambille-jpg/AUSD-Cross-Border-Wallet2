@@ -1,16 +1,19 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Modal, PanResponder, Pressable, ScrollView, StyleSheet, Text, TextInput, View, useWindowDimensions } from 'react-native';
+import { Linking, Modal, PanResponder, Pressable, ScrollView, StyleSheet, Text, TextInput, View, useWindowDimensions } from 'react-native';
 import { Feather } from '@expo/vector-icons';
 import { router } from 'expo-router';
 import { useColors } from '@/hooks/useColors';
 import { useWallet } from '@/state/wallet-context';
-import { getErc20Balance, getErc20TokenInfo, type Erc20TokenInfo } from '@/services/passkey';
+import { claimFaucetTokens, getErc20Balance, getErc20TokenInfo, type Erc20TokenInfo } from '@/services/passkey';
 import { formatIndexedTransfer, useIndexedActivity } from '@/services/indexed-activity';
 import { WALLET_TOKENS } from '@/services/tokens';
 import { Card, Divider, Eyebrow, Page, PrimaryButton } from '@/components/Primitives';
 
 const TRACKED_ASSETS_STORAGE_KEY = 'ausd-wallet-tracked-assets-v1';
+const HIDE_ZERO_STORAGE_KEY = 'ausd-wallet-hide-zero-v1';
+const MONAD_FAUCET_URL = process.env.EXPO_PUBLIC_MONAD_FAUCET_URL?.trim() || 'https://faucet.monad.xyz';
+const SPONSORSHIP_CONFIGURED = (process.env.EXPO_PUBLIC_PIMLICO_BUNDLER_URL ?? '').trim().length > 0;
 const defaultAssets: Erc20TokenInfo[] = [WALLET_TOKENS.AUSD, WALLET_TOKENS.USDC];
 
 const money = (amount: number) =>
@@ -29,7 +32,11 @@ export default function WalletHome() {
   const [assetAddress, setAssetAddress] = useState('');
   const [assetError, setAssetError] = useState('');
   const [addingAsset, setAddingAsset] = useState(false);
-  const [openAction, setOpenAction] = useState<'deposit' | 'swap' | null>(null);
+  const [hideZero, setHideZero] = useState(false);
+  const [claiming, setClaiming] = useState(false);
+  const [faucetError, setFaucetError] = useState('');
+  const [faucetDone, setFaucetDone] = useState('');
+  const [openAction, setOpenAction] = useState<'deposit' | null>(null);
   const [drawerOffset, setDrawerOffset] = useState(0);
   const isMeraWallet = profile?.mode === 'mera';
   const assets = useMemo(() => [
@@ -45,6 +52,11 @@ export default function WalletHome() {
         if (Array.isArray(stored)) setTrackedAssets(stored);
       })
       .catch(() => setChainBalanceError('Saved assets could not be loaded.'));
+    AsyncStorage.getItem(HIDE_ZERO_STORAGE_KEY)
+      .then((value) => {
+        if (value === '1') setHideZero(true);
+      })
+      .catch(() => undefined);
   }, []);
 
   const refreshBalances = useCallback(async () => {
@@ -87,6 +99,47 @@ export default function WalletHome() {
       setAddingAsset(false);
     }
   }
+
+  async function removeAsset(address: string) {
+    const next = trackedAssets.filter((item) => item.address.toLowerCase() !== address.toLowerCase());
+    await AsyncStorage.setItem(TRACKED_ASSETS_STORAGE_KEY, JSON.stringify(next));
+    setTrackedAssets(next);
+    setAssetBalances((current) => {
+      const copy = { ...current };
+      delete copy[address.toLowerCase()];
+      return copy;
+    });
+  }
+
+  function toggleHideZero() {
+    const next = !hideZero;
+    setHideZero(next);
+    void AsyncStorage.setItem(HIDE_ZERO_STORAGE_KEY, next ? '1' : '0');
+  }
+
+  async function claimTestTokens() {
+    setFaucetError('');
+    setFaucetDone('');
+    if (profile?.mode !== 'mera' || !profile.address || !profile.signerAddress || !profile.passkey) {
+      setFaucetError('Set up a Mera passkey wallet before claiming test tokens.');
+      return;
+    }
+    setClaiming(true);
+    try {
+      const result = await claimFaucetTokens({
+        address: profile.address,
+        signerAddress: profile.signerAddress,
+        credential: profile.passkey.credential,
+        rpId: profile.passkey.rpId,
+      });
+      setFaucetDone(`${Number(result.amount).toLocaleString('en-US')} AUSD claimed. It may take a moment to appear — pull to refresh.`);
+      await refreshBalances();
+    } catch (caught) {
+      setFaucetError(caught instanceof Error ? caught.message : 'The faucet claim did not complete.');
+    } finally {
+      setClaiming(false);
+    }
+  }
   const indexedHashes = new Set(indexedTransfers.map((item) => item.transactionHash.toLowerCase()));
   const recent = configured && !activityError
     ? [
@@ -103,6 +156,17 @@ export default function WalletHome() {
   const ausd = isMeraWallet ? assetBalances[WALLET_TOKENS.AUSD.address.toLowerCase()] ?? null : balance;
   const usdc = isMeraWallet ? assetBalances[WALLET_TOKENS.USDC.address.toLowerCase()] ?? null : 0;
   const totalBalance = ausd === null || usdc === null ? null : ausd + usdc;
+  const visibleAssets = useMemo(() => {
+    if (!isMeraWallet || !hideZero) return assets;
+    return assets.filter((asset) => {
+      const amount = assetBalances[asset.address.toLowerCase()];
+      return amount === undefined || amount === null || amount !== 0;
+    });
+  }, [assets, assetBalances, hideZero, isMeraWallet]);
+  // The Agora faucet caps holdings at 100,000 AUSD — offer a claim whenever a
+  // top-up could succeed, not only when the wallet is empty. Demo wallets see
+  // it too; claiming prompts passkey setup.
+  const showFaucet = !isMeraWallet || ausd === null || ausd < 100_000;
   const drawerPan = PanResponder.create({
     onMoveShouldSetPanResponder: (_event, gesture) => gesture.dy > 5,
     onPanResponderMove: (_event, gesture) => setDrawerOffset(Math.max(0, gesture.dy)),
@@ -129,16 +193,16 @@ export default function WalletHome() {
         </Pressable>
       </View>
 
-      <Card style={styles.balanceCard}>
+      <Card style={[styles.balanceCard, { backgroundColor: colors.foreground, borderWidth: 0 }]}>
         <View style={styles.balanceTop}>
-          <Text style={[styles.balanceLabel, { color: colors.mutedForeground }]}>TOTAL BALANCE</Text>
-          <View style={[styles.networkPill, { backgroundColor: colors.secondary }]}>
+          <Text style={[styles.balanceLabel, { color: 'rgba(255,255,255,0.65)' }]}>TOTAL BALANCE</Text>
+          <View style={[styles.networkPill, { backgroundColor: 'rgba(255,255,255,0.14)' }]}>
             <View style={[styles.balanceDot, { backgroundColor: colors.primary }]} />
-            <Text style={[styles.networkText, { color: colors.foreground }]}>{isMeraWallet ? 'TESTNET' : 'DEMO'}</Text>
+            <Text style={[styles.networkText, { color: '#ffffff' }]}>{isMeraWallet ? 'TESTNET' : 'DEMO'}</Text>
           </View>
         </View>
-        <Text style={[styles.balanceAmount, { color: colors.foreground }]}>${totalBalance === null ? '—' : money(totalBalance)}</Text>
-        <Text style={[styles.balanceFoot, { color: colors.mutedForeground }]}>
+        <Text style={[styles.balanceAmount, { color: '#ffffff' }]}>${totalBalance === null ? '—' : money(totalBalance)}</Text>
+        <Text style={[styles.balanceFoot, { color: 'rgba(255,255,255,0.65)' }]}>
           {chainBalanceError || (isMeraWallet ? 'AUSD + USDC on Monad' : 'Demo balance · AUSD')}
         </Text>
       </Card>
@@ -154,11 +218,6 @@ export default function WalletHome() {
           label="Transfer"
           onPress={() => router.push('/send')}
           primary
-        />
-        <QuickAction
-          icon="repeat"
-          label="Swap"
-          onPress={() => { setDrawerOffset(0); setOpenAction('swap'); }}
         />
       </View>
 
@@ -176,36 +235,26 @@ export default function WalletHome() {
               <View style={[styles.drawerHandle, { backgroundColor: colors.border }]} />
             </View>
             <View style={styles.drawerHeading}>
-              <View>
-                <Eyebrow>{openAction === 'deposit' ? 'RECEIVE' : 'MONAD TESTNET'}</Eyebrow>
-                <Text style={[styles.drawerTitle, { color: colors.foreground }]}>{openAction === 'deposit' ? 'Receive money' : 'Swap tokens'}</Text>
+              <View style={styles.drawerTitleWrap}>
+                <Eyebrow>MONEY IN</Eyebrow>
+                <Text style={[styles.drawerTitle, { color: colors.foreground }]}>Receive money</Text>
                 <Text style={[styles.drawerSubtitle, { color: colors.mutedForeground }]}>
-                  {openAction === 'deposit' ? 'Share your Monad wallet address or bridge funds from another network.' : 'Swap AUSD to CTK on Monad testnet.'}
+                  Share your Monad wallet address or bridge funds from another network.
                 </Text>
               </View>
               <Pressable accessibilityRole="button" accessibilityLabel="Close action drawer" onPress={() => setOpenAction(null)} style={[styles.drawerClose, { backgroundColor: colors.secondary }]}>
-                <Feather name="x" size={19} color={colors.foreground} />
+                <Feather name="x" size={18} color={colors.foreground} />
               </Pressable>
             </View>
             <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.drawerBody}>
-              {openAction === 'deposit' ? (
-                <>
-                  <View style={[styles.swapNotice, { backgroundColor: colors.secondary }]}>
-                    <Feather name="info" size={16} color={colors.primary} />
-                    <Text style={[styles.actionMethodCopy, { color: colors.mutedForeground, flex: 1 }]}>Receive directly to your Monad address, or bridge from another supported network with Aurora Intents.</Text>
-                  </View>
-                  <PrimaryButton label="Receive to wallet address" icon="copy" onPress={() => { setOpenAction(null); router.push('/receive'); }} />
-                  <PrimaryButton label="Deposit with Aurora Intents" icon="repeat" secondary onPress={() => { setOpenAction(null); router.push('/aurora-deposit'); }} />
-                </>
-              ) : (
-                <>
-                  <View style={[styles.swapNotice, { backgroundColor: colors.secondary }]}>
-                    <Feather name="info" size={16} color={colors.primary} />
-                    <Text style={[styles.actionMethodCopy, { color: colors.mutedForeground, flex: 1 }]}>AUSD → CTK on Monad testnet via Agora. CTK is a test token, not a stablecoin or fiat payout.</Text>
-                  </View>
-                  <PrimaryButton label="Get a swap quote" icon="arrow-right" onPress={() => { setOpenAction(null); router.push('/swap'); }} />
-                </>
-              )}
+              <View style={[styles.swapNotice, { backgroundColor: colors.secondary }]}>
+                <View style={[styles.noticeIcon, { backgroundColor: colors.background }]}>
+                  <Feather name="info" size={15} color={colors.primary} />
+                </View>
+                <Text style={[styles.actionMethodCopy, { color: colors.mutedForeground, flex: 1 }]}>Receive directly to your Monad address, or bridge from another supported network with Aurora Intents.</Text>
+              </View>
+              <PrimaryButton label="Receive to wallet address" icon="copy" onPress={() => { setOpenAction(null); router.push('/receive'); }} />
+              <PrimaryButton label="Deposit with Aurora Intents" icon="repeat" secondary onPress={() => { setOpenAction(null); router.push('/aurora-deposit'); }} />
             </ScrollView>
           </View>
         </View>
@@ -221,10 +270,10 @@ export default function WalletHome() {
         accessibilityRole="button"
         accessibilityLabel="Start a savings goal"
         onPress={() => router.push('/savings-goals')}
-        style={({ pressed }) => [styles.goalCard, { borderColor: colors.border, backgroundColor: colors.card, opacity: pressed ? 0.7 : 1 }]}
+        style={({ pressed }) => [styles.goalCard, { backgroundColor: colors.secondary, borderWidth: 0, opacity: pressed ? 0.7 : 1 }]}
       >
-        <View style={[styles.goalIcon, { backgroundColor: colors.secondary }]}>
-          <Feather name="target" size={19} color={colors.foreground} />
+        <View style={[styles.goalIcon, { backgroundColor: colors.primarySoft }]}>
+          <Feather name="target" size={18} color={colors.primary} />
         </View>
         <View style={styles.goalCopy}>
           <Text style={[styles.goalTitle, { color: colors.foreground }]}>Create a savings goal</Text>
@@ -233,19 +282,88 @@ export default function WalletHome() {
         <Feather name="plus-circle" size={20} color={colors.primary} />
       </Pressable>
 
+      {!SPONSORSHIP_CONFIGURED ? (
+        <Card style={[styles.sponsorBanner, { backgroundColor: colors.secondary, borderWidth: 0 }]}>
+          <View style={[styles.sponsorIcon, { backgroundColor: colors.background }]}>
+            <Feather name="zap" size={15} color={colors.destructive} />
+          </View>
+          <View style={styles.sponsorCopy}>
+            <Text style={[styles.sponsorTitle, { color: colors.foreground }]}>Gas sponsorship not configured</Text>
+            <Text style={[styles.sponsorSub, { color: colors.mutedForeground }]}>Sends and swaps will fail until EXPO_PUBLIC_PIMLICO_BUNDLER_URL is set. Balances and activity still work.</Text>
+          </View>
+        </Card>
+      ) : (
+        <View style={styles.sponsorOk}>
+          <Feather name="zap" size={13} color={colors.primary} />
+          <Text style={[styles.sponsorOkText, { color: colors.mutedForeground }]}>Gas sponsored · Pimlico</Text>
+        </View>
+      )}
+
       <View style={styles.sectionHead}>
         <Text style={[styles.sectionTitle, { color: colors.foreground }]}>Assets</Text>
-        <Pressable accessibilityRole="button" accessibilityLabel="Add an asset" onPress={() => { setAssetError(''); setAssetModalOpen(true); }}>
-          <Text style={[styles.seeAll, { color: colors.primary }]}>Add asset</Text>
-        </Pressable>
+        <View style={styles.assetHeadActions}>
+          <Pressable accessibilityRole="button" accessibilityLabel="Toggle hiding zero balances" onPress={toggleHideZero}>
+            <Text style={[styles.seeAll, { color: hideZero ? colors.foreground : colors.primary }]}>{hideZero ? 'Show zeros' : 'Hide zeros'}</Text>
+          </Pressable>
+          <Pressable accessibilityRole="button" accessibilityLabel="Add an asset" onPress={() => { setAssetError(''); setAssetModalOpen(true); }}>
+            <Text style={[styles.seeAll, { color: colors.primary }]}>Add asset</Text>
+          </Pressable>
+        </View>
       </View>
-      <Card style={styles.assetCard}>
-        {assets.map((asset, index) => (
-          <React.Fragment key={asset.address}>
-            {index > 0 ? <Divider /> : null}
-            <AssetRow symbol={asset.symbol.slice(0, 1)} name={asset.name} ticker={asset.symbol} amount={isMeraWallet ? assetBalances[asset.address.toLowerCase()] ?? null : asset.symbol === 'AUSD' ? balance : 0} />
-          </React.Fragment>
-        ))}
+      {showFaucet ? (
+        <View style={styles.faucetWrap}>
+          <Card style={[styles.faucetCard, { backgroundColor: colors.primarySoft, borderWidth: 0 }]}>
+            <View style={[styles.sponsorIcon, { backgroundColor: colors.background }]}>
+              <Feather name="droplet" size={15} color={colors.primary} />
+            </View>
+            <View style={styles.sponsorCopy}>
+              <Text style={[styles.sponsorTitle, { color: colors.foreground }]}>Need test tokens?</Text>
+              <Text style={[styles.sponsorSub, { color: colors.mutedForeground }]}>Claim 10,000 AUSD from Agora's faucet — gas sponsored, one passkey approval.</Text>
+            </View>
+            {SPONSORSHIP_CONFIGURED ? (
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Claim 10,000 test AUSD"
+                disabled={claiming}
+                onPress={() => void claimTestTokens()}
+                style={[styles.faucetButton, { backgroundColor: colors.primary, opacity: claiming ? 0.6 : 1 }]}
+              >
+                <Text style={[styles.faucetText, { color: colors.primaryForeground }]}>{claiming ? 'Claiming…' : 'Claim'}</Text>
+                <Feather name={claiming ? 'loader' : 'droplet'} size={13} color={colors.primaryForeground} />
+              </Pressable>
+            ) : (
+              <Pressable accessibilityRole="link" accessibilityLabel="Open Monad testnet faucet" onPress={() => void Linking.openURL(MONAD_FAUCET_URL)} style={[styles.faucetButton, { backgroundColor: colors.primary }]}>
+                <Text style={[styles.faucetText, { color: colors.primaryForeground }]}>Faucet</Text>
+                <Feather name="external-link" size={13} color={colors.primaryForeground} />
+              </Pressable>
+            )}
+          </Card>
+          {faucetError ? <Text accessibilityRole="alert" style={[styles.assetError, { color: colors.destructive }]}>{faucetError}</Text> : null}
+          {faucetDone ? <Text style={[styles.faucetDone, { color: colors.primary }]}>{faucetDone}</Text> : null}
+        </View>
+      ) : null}
+      <Card style={[styles.assetCard, { backgroundColor: colors.secondary, borderWidth: 0 }]}>
+        {visibleAssets.map((asset, index) => {
+          const isCustom = trackedAssets.some((item) => item.address.toLowerCase() === asset.address.toLowerCase());
+          return (
+            <React.Fragment key={asset.address}>
+              {index > 0 ? <Divider /> : null}
+              <AssetRow
+                symbol={asset.symbol.slice(0, 1)}
+                name={asset.name}
+                ticker={asset.symbol}
+                amount={isMeraWallet ? assetBalances[asset.address.toLowerCase()] ?? null : asset.symbol === 'AUSD' ? balance : 0}
+                custom={isCustom}
+                onRemove={isCustom ? () => void removeAsset(asset.address) : undefined}
+              />
+            </React.Fragment>
+          );
+        })}
+        {!visibleAssets.length ? (
+          <View style={styles.emptyActivity}>
+            <Text style={[styles.emptyCopy, { color: colors.mutedForeground }]}>All balances are zero. Turn off “Hide zeros” or get test tokens from the faucet.</Text>
+          </View>
+        ) : null}
       </Card>
 
       <Modal visible={assetModalOpen} transparent animationType="fade" onRequestClose={() => setAssetModalOpen(false)}>
@@ -263,7 +381,7 @@ export default function WalletHome() {
               autoCapitalize="none"
               autoCorrect={false}
               selectionColor={colors.primary}
-              style={[styles.assetInput, { color: colors.foreground, borderColor: colors.border, backgroundColor: colors.secondary }]}
+              style={[styles.assetInput, { color: colors.foreground, backgroundColor: colors.secondary }]}
             />
             {assetError ? <Text style={[styles.assetError, { color: colors.destructive }]}>{assetError}</Text> : null}
             <View style={styles.assetModalActions}>
@@ -280,7 +398,7 @@ export default function WalletHome() {
           <Text style={[styles.seeAll, { color: colors.primary }]}>See all</Text>
         </Pressable>
       </View>
-      <Card style={styles.activityCard}>
+      <Card style={[styles.activityCard, { backgroundColor: colors.secondary, borderWidth: 0 }]}>
         {recent.length ? (
           recent.map((entry, index) => {
             const indexed = 'indexed' in entry ? entry.indexed : undefined;
@@ -297,7 +415,7 @@ export default function WalletHome() {
             <React.Fragment key={indexed?.id ?? transfer?.id ?? index}>
               {index > 0 ? <Divider /> : null}
               <View style={styles.activityRow}>
-                <View style={[styles.activityIcon, { backgroundColor: colors.secondary }]}>
+                <View style={[styles.activityIcon, { backgroundColor: colors.background }]}>
                   <Feather name={indexed && !indexed.outgoing ? 'arrow-down-left' : 'arrow-up-right'} size={16} color={colors.foreground} />
                 </View>
                 <View style={styles.activityInfo}>
@@ -330,21 +448,26 @@ export default function WalletHome() {
   );
 }
 
-function AssetRow({ symbol, name, ticker, amount }: { symbol: string; name: string; ticker: string; amount: number | null }) {
+function AssetRow({ symbol, name, ticker, amount, custom, onRemove }: { symbol: string; name: string; ticker: string; amount: number | null; custom?: boolean; onRemove?: () => void }) {
   const colors = useColors();
   return (
     <View style={styles.assetRow}>
-      <View style={[styles.assetIcon, { backgroundColor: colors.secondary }]}>
+      <View style={[styles.assetIcon, { backgroundColor: colors.background }]}>
         <Text style={[styles.assetSymbol, { color: colors.foreground }]}>{symbol}</Text>
       </View>
       <View style={styles.assetInfo}>
         <Text style={[styles.assetName, { color: colors.foreground }]}>{name}</Text>
-        <Text style={[styles.assetTicker, { color: colors.mutedForeground }]}>{ticker}</Text>
+        <Text style={[styles.assetTicker, { color: colors.mutedForeground }]}>{ticker}{custom ? ' · custom' : ''}</Text>
       </View>
       <View style={styles.assetValue}>
         <Text style={[styles.assetAmount, { color: colors.foreground }]}>{amount === null ? '—' : money(amount)}</Text>
         <Text style={[styles.assetUsd, { color: colors.mutedForeground }]}>{ticker === 'AUSD' || ticker === 'USDC' ? `$${amount === null ? '—' : money(amount)}` : ticker}</Text>
       </View>
+      {custom && onRemove ? (
+        <Pressable accessibilityRole="button" accessibilityLabel={`Remove ${ticker}`} onPress={onRemove} style={styles.removeButton}>
+          <Feather name="x" size={15} color={colors.mutedForeground} />
+        </Pressable>
+      ) : null}
     </View>
   );
 }
@@ -362,58 +485,65 @@ function QuickAction({
 }) {
   const colors = useColors();
   return (
-    <Pressable onPress={onPress} style={({ pressed }) => [styles.quickAction, { opacity: pressed ? 0.6 : 1 }]}>
-      <View style={[styles.quickIcon, { backgroundColor: primary ? colors.primary : colors.secondary }]}>
-        <Feather
-          name={icon}
-          size={19}
-          color={primary ? colors.primaryForeground : colors.foreground}
-        />
-      </View>
-      <Text style={[styles.quickLabel, { color: colors.foreground }]}>{label}</Text>
+    <Pressable
+      onPress={onPress}
+      style={({ pressed }) => [
+        styles.quickAction,
+        { backgroundColor: primary ? colors.primary : colors.secondary, opacity: pressed ? 0.75 : 1 },
+      ]}
+    >
+      <Feather
+        name={icon}
+        size={17}
+        color={primary ? colors.primaryForeground : colors.foreground}
+      />
+      <Text style={[styles.quickLabel, { color: primary ? colors.primaryForeground : colors.foreground }]}>
+        {label}
+      </Text>
     </Pressable>
   );
 }
 
 const styles = StyleSheet.create({
-  page: { gap: 17, paddingTop: 12, paddingBottom: 24 },
+  page: { gap: 14, paddingTop: 12, paddingBottom: 24 },
   header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
-  pageTitle: { fontSize: 25, lineHeight: 32, letterSpacing: -0.8, fontFamily: 'Inter_600SemiBold', marginTop: 3 },
-  profileButton: { width: 42, height: 42, borderRadius: 21, alignItems: 'center', justifyContent: 'center' },
-  balanceCard: { minHeight: 142, justifyContent: 'space-between', padding: 18 },
+  pageTitle: { fontSize: 22, lineHeight: 28, letterSpacing: -0.6, fontFamily: 'Inter_600SemiBold', marginTop: 2 },
+  profileButton: { width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center' },
+  balanceCard: { minHeight: 138, justifyContent: 'space-between', padding: 16, borderRadius: 20 },
   balanceTop: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
   balanceLabel: { fontSize: 10, letterSpacing: 1, fontFamily: 'Inter_600SemiBold' },
   networkPill: { height: 25, borderRadius: 13, flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 9 },
   balanceDot: { width: 6, height: 6, borderRadius: 3 },
   networkText: { fontSize: 9, letterSpacing: 0.6, fontFamily: 'Inter_600SemiBold' },
-  balanceAmount: { fontSize: 36, lineHeight: 44, letterSpacing: -1.5, fontFamily: 'Inter_600SemiBold' },
+  balanceAmount: { fontSize: 32, lineHeight: 38, letterSpacing: -1.2, fontFamily: 'Inter_600SemiBold' },
   balanceFoot: { fontSize: 11, fontFamily: 'Inter_400Regular' },
-  quickActions: { flexDirection: 'row', justifyContent: 'space-around', paddingHorizontal: 5, paddingTop: 1 },
-  quickAction: { alignItems: 'center', gap: 7, minWidth: 78 },
-  quickIcon: { width: 49, height: 49, borderRadius: 17, alignItems: 'center', justifyContent: 'center' },
-  quickLabel: { fontSize: 12, fontFamily: 'Inter_500Medium' },
+  quickActions: { flexDirection: 'row', gap: 10 },
+  quickAction: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, minHeight: 52, borderRadius: 16 },
+  quickLabel: { fontSize: 13, fontFamily: 'Inter_600SemiBold' },
   drawerOverlay: { flex: 1, justifyContent: 'flex-end' },
   drawerBackdrop: { position: 'absolute', top: 0, right: 0, bottom: 0, left: 0, backgroundColor: 'rgba(16, 18, 24, 0.48)' },
   actionDrawer: { borderTopLeftRadius: 28, borderTopRightRadius: 28, paddingHorizontal: 22, paddingBottom: 28, overflow: 'hidden' },
   drawerHandleArea: { height: 38, alignItems: 'center', justifyContent: 'center' },
   drawerHandle: { width: 38, height: 4, borderRadius: 3 },
-  drawerHeading: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 18 },
-  drawerTitle: { fontSize: 25, lineHeight: 32, letterSpacing: -0.6, fontFamily: 'Inter_600SemiBold', marginTop: 3 },
+  drawerHeading: { flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, marginBottom: 16 },
+  drawerTitleWrap: { flex: 1, gap: 2 },
+  drawerTitle: { fontSize: 22, lineHeight: 28, letterSpacing: -0.5, fontFamily: 'Inter_600SemiBold', marginTop: 3 },
   drawerSubtitle: { fontSize: 12, fontFamily: 'Inter_400Regular', marginTop: 3 },
   drawerClose: { width: 38, height: 38, borderRadius: 19, alignItems: 'center', justifyContent: 'center' },
-  drawerBody: { gap: 14, paddingBottom: 16 },
+  drawerBody: { gap: 12, paddingBottom: 16 },
+  noticeIcon: { width: 32, height: 32, borderRadius: 11, alignItems: 'center', justifyContent: 'center' },
   actionMethodCopy: { fontSize: 11, marginTop: 4, fontFamily: 'Inter_400Regular', lineHeight: 16 },
   swapNotice: { flexDirection: 'row', alignItems: 'flex-start', gap: 10, borderRadius: 14, padding: 14, marginTop: 6 },
-  sectionHead: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 3 },
-  sectionTitle: { fontSize: 17, letterSpacing: -0.35, fontFamily: 'Inter_600SemiBold' },
+  sectionHead: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 2 },
+  sectionTitle: { fontSize: 16, letterSpacing: -0.3, fontFamily: 'Inter_600SemiBold' },
   seeAll: { fontSize: 12, fontFamily: 'Inter_600SemiBold' },
-  goalCard: { minHeight: 74, borderWidth: 1, borderRadius: 12, padding: 12, flexDirection: 'row', alignItems: 'center', gap: 11 },
-  goalIcon: { width: 43, height: 43, borderRadius: 14, alignItems: 'center', justifyContent: 'center' },
+  goalCard: { minHeight: 70, borderRadius: 16, padding: 12, flexDirection: 'row', alignItems: 'center', gap: 11 },
+  goalIcon: { width: 40, height: 40, borderRadius: 13, alignItems: 'center', justifyContent: 'center' },
   goalCopy: { flex: 1, gap: 3 },
   goalTitle: { fontSize: 13, fontFamily: 'Inter_600SemiBold' },
   goalSubtitle: { fontSize: 11, fontFamily: 'Inter_400Regular' },
-  assetCard: { paddingHorizontal: 14, paddingVertical: 3, gap: 0 },
-  assetRow: { minHeight: 65, flexDirection: 'row', alignItems: 'center', gap: 11 },
+  assetCard: { paddingHorizontal: 14, paddingVertical: 3, gap: 0, borderRadius: 16 },
+  assetRow: { minHeight: 62, flexDirection: 'row', alignItems: 'center', gap: 11 },
   assetIcon: { width: 39, height: 39, borderRadius: 20, alignItems: 'center', justifyContent: 'center' },
   assetSymbol: { fontSize: 16, fontFamily: 'Inter_600SemiBold' },
   assetInfo: { flex: 1, gap: 3 },
@@ -422,8 +552,8 @@ const styles = StyleSheet.create({
   assetValue: { alignItems: 'flex-end', gap: 3 },
   assetAmount: { fontSize: 13, fontFamily: 'Inter_600SemiBold' },
   assetUsd: { fontSize: 10, fontFamily: 'Inter_400Regular' },
-  activityCard: { paddingHorizontal: 14, paddingVertical: 5, gap: 0 },
-  activityRow: { minHeight: 65, flexDirection: 'row', alignItems: 'center', gap: 10 },
+  activityCard: { paddingHorizontal: 14, paddingVertical: 5, gap: 0, borderRadius: 16 },
+  activityRow: { minHeight: 62, flexDirection: 'row', alignItems: 'center', gap: 10 },
   activityIcon: { width: 36, height: 36, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
   activityInfo: { flex: 1, gap: 3 },
   activityName: { fontSize: 13, fontFamily: 'Inter_600SemiBold' },
@@ -433,10 +563,24 @@ const styles = StyleSheet.create({
   emptyTitle: { marginTop: 3, fontSize: 14, fontFamily: 'Inter_600SemiBold' },
   emptyCopy: { fontSize: 11, fontFamily: 'Inter_400Regular' },
   assetModalOverlay: { flex: 1, justifyContent: 'center', padding: 22, backgroundColor: 'rgba(16, 18, 24, 0.48)' },
-  assetModal: { borderRadius: 20, padding: 20, gap: 13 },
-  assetModalTitle: { fontSize: 21, fontFamily: 'Inter_600SemiBold' },
+  assetModal: { borderRadius: 20, padding: 18, gap: 12 },
+  assetModalTitle: { fontSize: 19, fontFamily: 'Inter_600SemiBold' },
   assetModalCopy: { fontSize: 12, lineHeight: 18, fontFamily: 'Inter_400Regular' },
-  assetInput: { minHeight: 48, borderWidth: 1, borderRadius: 12, paddingHorizontal: 13, fontSize: 13, fontFamily: 'Inter_400Regular' },
+  assetInput: { minHeight: 48, borderRadius: 12, paddingHorizontal: 13, fontSize: 13, fontFamily: 'Inter_400Regular' },
   assetError: { fontSize: 11, lineHeight: 16, fontFamily: 'Inter_400Regular' },
   assetModalActions: { flexDirection: 'row', gap: 10 },
+  sponsorBanner: { flexDirection: 'row', alignItems: 'flex-start', gap: 10, padding: 14, borderRadius: 16 },
+  sponsorIcon: { width: 34, height: 34, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
+  sponsorCopy: { flex: 1, gap: 3 },
+  sponsorTitle: { fontSize: 12, fontFamily: 'Inter_600SemiBold' },
+  sponsorSub: { fontSize: 11, lineHeight: 16, fontFamily: 'Inter_400Regular' },
+  sponsorOk: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, marginTop: -6 },
+  sponsorOkText: { fontSize: 10, fontFamily: 'Inter_500Medium' },
+  assetHeadActions: { flexDirection: 'row', alignItems: 'center', gap: 14 },
+  faucetCard: { flexDirection: 'row', alignItems: 'center', gap: 10, padding: 14, borderRadius: 16 },
+  faucetWrap: { gap: 8 },
+  faucetDone: { fontSize: 11, lineHeight: 16, fontFamily: 'Inter_500Medium' },
+  faucetButton: { flexDirection: 'row', alignItems: 'center', gap: 6, borderRadius: 11, paddingHorizontal: 12, paddingVertical: 9 },
+  faucetText: { fontSize: 12, fontFamily: 'Inter_600SemiBold' },
+  removeButton: { width: 30, height: 30, borderRadius: 15, alignItems: 'center', justifyContent: 'center' },
 });

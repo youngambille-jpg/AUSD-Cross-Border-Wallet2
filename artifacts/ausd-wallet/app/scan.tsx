@@ -2,8 +2,9 @@ import React, { useRef, useState } from 'react';
 import { CameraView, useCameraPermissions, type BarcodeScanningResult } from 'expo-camera';
 import { router } from 'expo-router';
 import { StyleSheet, Text, View } from 'react-native';
-import { isAddress } from 'viem';
+import { formatUnits, isAddress } from 'viem';
 import { useColors } from '@/hooks/useColors';
+import { WALLET_TOKENS, type WalletToken } from '@/services/tokens';
 import {
   BackButton,
   Card,
@@ -14,7 +15,11 @@ import {
   Title,
 } from '@/components/Primitives';
 
-function readPaymentRequest(value: string) {
+const TOKEN_BY_ADDRESS = new Map(
+  (Object.keys(WALLET_TOKENS) as WalletToken[]).map((symbol) => [WALLET_TOKENS[symbol].address.toLowerCase(), symbol]),
+);
+
+function readInternalRequest(value: string) {
   try {
     const url = new URL(value);
     if (url.protocol !== 'ausd-wallet:' || url.pathname.replace(/^\/+/, '') !== 'send') return null;
@@ -22,12 +27,50 @@ function readPaymentRequest(value: string) {
     const amount = url.searchParams.get('amount')?.trim() ?? '';
     const token = url.searchParams.get('token')?.trim().toUpperCase() ?? 'AUSD';
     if (!isAddress(recipient, { strict: false })) return null;
-    if (amount && (!/^\d+(\.\d{1,6})?$/.test(amount) || Number(amount) <= 0)) return null;
-    if (token !== 'AUSD' && token !== 'USDC') return null;
+    if (amount && (!/^\d+(\.\d{1,18})?$/.test(amount) || Number(amount) <= 0)) return null;
+    if (token !== 'AUSD' && token !== 'USDC' && token !== 'CTK') return null;
     return { recipient, amount, token };
   } catch {
     return null;
   }
+}
+
+function readEip681(value: string) {
+  const trimmed = value.trim();
+  if (!trimmed.toLowerCase().startsWith('ethereum:')) return null;
+  try {
+    const withoutScheme = trimmed.slice('ethereum:'.length);
+    const [targetPart, queryPart] = withoutScheme.split('?');
+    const tokenPart = targetPart.split('@')[0] ?? '';
+    if (!isAddress(tokenPart, { strict: false })) return null;
+    const symbol = TOKEN_BY_ADDRESS.get(tokenPart.toLowerCase());
+    const params = new URLSearchParams(queryPart ?? '');
+    const recipientRaw = params.get('address')?.trim() ?? '';
+    // Bare token address QR (no transfer fn): treat as receive asset hint, no recipient.
+    if (!recipientRaw) return null;
+    if (!isAddress(recipientRaw, { strict: false })) return null;
+    const rawAmount = params.get('uint256')?.trim() ?? '';
+    if (!rawAmount) return { recipient: recipientRaw, amount: '', token: symbol ?? 'AUSD' };
+    if (!/^\d+$/.test(rawAmount)) return null;
+    if (!symbol) return { recipient: recipientRaw, amount: '', token: 'AUSD' };
+    const decimals = WALLET_TOKENS[symbol].decimals;
+    const amount = formatUnits(BigInt(rawAmount), decimals);
+    if (Number(amount) <= 0) return null;
+    return { recipient: recipientRaw, amount, token: symbol };
+  } catch {
+    return null;
+  }
+}
+
+function readPaymentRequest(value: string) {
+  const internal = readInternalRequest(value);
+  if (internal) return internal;
+  const eip = readEip681(value);
+  if (eip) return eip;
+  if (isAddress(value.trim(), { strict: false })) {
+    return { recipient: value.trim(), amount: '', token: 'AUSD' };
+  }
+  return null;
 }
 
 export default function ScanScreen() {
@@ -40,7 +83,7 @@ export default function ScanScreen() {
     if (scanned.current) return;
     const request = readPaymentRequest(result.data);
     if (!request) {
-      setError('This QR code is not a valid AUSD Wallet payment request.');
+      setError('This QR code is not a valid payment request. It should be an AUSD Wallet link, an EIP-681 request, or a wallet address.');
       return;
     }
     scanned.current = true;
@@ -53,7 +96,7 @@ export default function ScanScreen() {
       <View style={styles.heading}>
         <Eyebrow>SEND TOKEN</Eyebrow>
         <Title>Scan a payment request.</Title>
-        <Text style={[styles.subtitle, { color: colors.mutedForeground }]}>AUSD and USDC requests on Monad testnet are accepted.</Text>
+        <Text style={[styles.subtitle, { color: colors.mutedForeground }]}>AUSD Wallet links, EIP-681 requests, and plain wallet addresses are accepted.</Text>
       </View>
 
       {!permission ? (

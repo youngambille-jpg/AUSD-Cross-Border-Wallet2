@@ -31,10 +31,12 @@ export default function ReviewScreen() {
     mode?: string; recipient?: string; recipientName?: string; amount?: string; quoteOutput?: string;
     swapAmount?: string; quoteMode?: string; quoteInputRaw?: string; inputToken?: string; outputToken?: string; token?: string;
     quoteOutputRaw?: string; quoteCheckedAt?: string; pairAddress?: string; purchaseFeeRate?: string;
+    quotedOutput?: string; slippageBps?: string;
     pocketId?: string; goalName?: string; autoSaveBps?: string;
   }>();
   const { profile, addTransfer } = useWallet();
   const [busy, setBusy] = useState(false);
+  const [busyStage, setBusyStage] = useState<'approval' | 'confirming'>('approval');
   const [error, setError] = useState('');
   const amount = Number(params.amount ?? 0);
   const recipient = typeof params.recipient === 'string' ? params.recipient.trim() : '';
@@ -58,8 +60,14 @@ export default function ReviewScreen() {
     }
   }
   const quoteOutput = typeof params.quoteOutput === 'string' ? params.quoteOutput : '';
+  const quotedOutput = typeof params.quotedOutput === 'string' ? params.quotedOutput : quoteOutput;
+  const slippageBps = typeof params.slippageBps === 'string' ? Number(params.slippageBps) : 0;
   const purchaseFeeRate = typeof params.purchaseFeeRate === 'string' ? Number(params.purchaseFeeRate) : 0;
   const quoteCheckedAt = typeof params.quoteCheckedAt === 'string' ? params.quoteCheckedAt : '';
+  const quoteTimeMs = quoteCheckedAt ? Date.parse(quoteCheckedAt) : NaN;
+  const quoteAgeSecs = Number.isFinite(quoteTimeMs) ? Math.max(0, Math.floor((Date.now() - quoteTimeMs) / 1000)) : null;
+  const quoteExpired = quoteAgeSecs !== null && quoteAgeSecs > 5 * 60;
+  const quoteStale = quoteAgeSecs !== null && quoteAgeSecs > 4 * 60 && !quoteExpired;
   const quoteTime = quoteCheckedAt && Number.isFinite(Date.parse(quoteCheckedAt))
     ? new Date(quoteCheckedAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
     : '';
@@ -83,6 +91,8 @@ export default function ReviewScreen() {
     }
     setError('');
     setBusy(true);
+    setBusyStage('approval');
+    const stageTimer = setTimeout(() => setBusyStage('confirming'), 8000);
     try {
       const account = {
         address: profile.address,
@@ -172,6 +182,7 @@ export default function ReviewScreen() {
           : 'The sponsored transfer failed. No receipt was recorded.',
       );
     } finally {
+      clearTimeout(stageTimer);
       setBusy(false);
     }
   }
@@ -210,7 +221,7 @@ export default function ReviewScreen() {
         ) : null}
         <View style={[styles.rule, { backgroundColor: colors.border }]} />
         <View style={styles.summaryLine}>
-          <Text style={[styles.metaLabel, { color: colors.mutedForeground }]}>{settlement ? 'AGORA QUOTED OUTPUT' : 'RECIPIENT RECEIVES'}</Text>
+          <Text style={[styles.metaLabel, { color: colors.mutedForeground }]}>{settlement ? 'MINIMUM RECEIVED · AGORA QUOTE' : 'RECIPIENT RECEIVES'}</Text>
           <Text style={[styles.outputValue, { color: colors.foreground }]}>
             {settlement
               ? quoteOutput ? `${Number(quoteOutput).toLocaleString('en-US', { maximumFractionDigits: WALLET_TOKENS[outputToken].decimals })} ${outputToken}` : 'Quote unavailable'
@@ -219,7 +230,21 @@ export default function ReviewScreen() {
         </View>
         {settlement ? (
           <Text style={[styles.quoteNote, { color: colors.mutedForeground }]}>
-            {quoteTime ? `Quote from ${quoteTime} · ` : ''}{purchaseFeeRate > 0 ? `Pair fee ${(purchaseFeeRate * 100).toLocaleString('en-US', { maximumFractionDigits: 4 })}% is included. ` : 'The quoted output is protected by the reviewed minimum. '}{tokenSwap ? `${inputToken} to ${outputToken}` : 'CTK is the testnet settlement token.'}
+            {quoteTime ? `Quote from ${quoteTime}${quoteAgeSecs !== null ? ` · ${quoteAgeSecs}s ago` : ''} · ` : ''}{purchaseFeeRate > 0 ? `Pair fee ${(purchaseFeeRate * 100).toLocaleString('en-US', { maximumFractionDigits: 4 })}% is included. ` : 'The quoted output is protected by the reviewed minimum. '}{tokenSwap ? `${inputToken} to ${outputToken}` : `${inputToken} to ${outputToken} testnet settlement.`}
+          </Text>
+        ) : null}
+        {settlement && tokenSwap && slippageBps > 0 && quotedOutput ? (
+          <Text style={[styles.quoteNote, { color: colors.mutedForeground }]}>
+            Quoted {Number(quotedOutput).toLocaleString('en-US', { maximumFractionDigits: WALLET_TOKENS[outputToken].decimals })} {outputToken} · min {Number(quoteOutput).toLocaleString('en-US', { maximumFractionDigits: WALLET_TOKENS[outputToken].decimals })} after {slippageBps / 100}% slippage (enforced on-chain).
+          </Text>
+        ) : null}
+        {settlement && quoteExpired ? (
+          <Text accessibilityRole="alert" style={[styles.quoteNote, { color: colors.destructive }]}>
+            This quote is over 5 minutes old and will be rejected. Go back for a fresh quote.
+          </Text>
+        ) : settlement && quoteStale ? (
+          <Text style={[styles.quoteNote, { color: colors.mutedForeground }]}>
+            Quote is almost expired. If submission fails, go back and refresh it.
           </Text>
         ) : null}
       </Card>
@@ -244,8 +269,8 @@ export default function ReviewScreen() {
         <View accessibilityLiveRegion="polite" style={[styles.progressPanel, { backgroundColor: colors.secondary }]}>
           <ActivityIndicator color={colors.primary} />
           <View style={styles.progressCopy}>
-            <Text style={[styles.progressTitle, { color: colors.foreground }]}>Waiting for confirmation</Text>
-            <Text style={[styles.networkCaption, { color: colors.mutedForeground }]}>Approve with your passkey, then we’ll wait for Monad testnet to confirm.</Text>
+            <Text style={[styles.progressTitle, { color: colors.foreground }]}>{busyStage === 'approval' ? 'Requesting passkey approval…' : 'Waiting for Monad confirmation…'}</Text>
+            <Text style={[styles.networkCaption, { color: colors.mutedForeground }]}>{busyStage === 'approval' ? 'Approve with your passkey to submit the sponsored transaction.' : 'Submitted. Waiting for Monad testnet to confirm.'}</Text>
           </View>
         </View>
       ) : null}

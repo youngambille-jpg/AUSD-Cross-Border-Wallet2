@@ -15,7 +15,7 @@ const LEGACY_STORAGE_KEY = 'ausd-wallet-state-v1';
 const PROFILE_STORAGE_KEY = 'ausd-wallet-profile-v2';
 const TRANSFERS_STORAGE_KEY = 'ausd-wallet-transfers-v2';
 const INTRO_STORAGE_KEY = 'ausd-wallet-intro-complete-v1';
-const DEMO_BALANCE = 1248.5;
+const DEMO_BALANCE = 0;
 
 export type WalletMode = 'demo' | 'mera';
 

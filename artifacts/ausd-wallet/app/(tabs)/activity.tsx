@@ -1,5 +1,5 @@
-import React from 'react';
-import { ActivityIndicator, Linking, Pressable, StyleSheet, Text, View } from 'react-native';
+import React, { useMemo, useState } from 'react';
+import { ActivityIndicator, Linking, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 import { Feather } from '@expo/vector-icons';
 import { useColors } from '@/hooks/useColors';
 import { useWallet } from '@/state/wallet-context';
@@ -9,10 +9,19 @@ import { formatIndexedSavings, formatIndexedTransfer, useIndexedActivity } from 
 const amountText = (amount: number) =>
   amount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 6 });
 
+type DirectionFilter = 'all' | 'sent' | 'received';
+type TokenFilter = 'ALL' | 'AUSD' | 'USDC' | 'CTK';
+
+const TOKEN_FILTERS: TokenFilter[] = ['ALL', 'AUSD', 'USDC', 'CTK'];
+
 export default function ActivityScreen() {
   const colors = useColors();
   const { profile, transfers: localTransfers } = useWallet();
-  const { transfers: indexedTransfers, savings: indexedSavings, loading, error, configured } = useIndexedActivity(profile?.address);
+  const { transfers: indexedTransfers, savings: indexedSavings, loading, error, configured, refresh } = useIndexedActivity(profile?.address);
+  const [refreshing, setRefreshing] = useState(false);
+  const [direction, setDirection] = useState<DirectionFilter>('all');
+  const [tokenFilter, setTokenFilter] = useState<TokenFilter>('ALL');
+  const [query, setQuery] = useState('');
   const useIndexed = configured && !error;
   const indexedHashes = new Set(indexedTransfers.map((item) => item.transactionHash.toLowerCase()));
   const transfers = useIndexed
@@ -27,8 +36,32 @@ export default function ActivityScreen() {
         return new Date(rightDate).getTime() - new Date(leftDate).getTime();
       })
     : localTransfers.map((item) => ({ local: item }));
+
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    return transfers.filter((entry) => {
+      const token = 'indexed' in entry ? entry.indexed.token : entry.local.receivedCurrency ?? entry.local.currency;
+      const outgoing = 'indexed' in entry ? entry.indexed.outgoing : true;
+      const counterparty = 'indexed' in entry ? entry.indexed.counterparty : entry.local.recipient;
+      const hash = ('indexed' in entry ? entry.indexed.transactionHash : entry.local.transactionHash ?? '').toLowerCase();
+      if (direction === 'sent' && !outgoing) return false;
+      if (direction === 'received' && outgoing) return false;
+      if (tokenFilter !== 'ALL' && token.toUpperCase() !== tokenFilter) return false;
+      if (q && !counterparty.toLowerCase().includes(q) && !hash.includes(q)) return false;
+      return true;
+    });
+  }, [transfers, direction, tokenFilter, query]);
+
+  async function onRefresh() {
+    setRefreshing(true);
+    refresh();
+    // Local transfers are synchronous from context; give the indexer a beat to resolve.
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    setRefreshing(false);
+  }
+
   return (
-    <Page contentStyle={styles.page}>
+    <Page contentStyle={styles.page} refreshing={refreshing} onRefresh={() => void onRefresh()}>
       <Eyebrow>PAYMENTS</Eyebrow>
       <Title>Activity</Title>
       <Text style={[styles.intro, { color: colors.mutedForeground }]}>
@@ -40,7 +73,39 @@ export default function ActivityScreen() {
           {loading ? 'Syncing on-chain activity' : useIndexed ? 'Live activity · Envio indexer' : error ? 'Showing saved activity · indexer unavailable' : 'Saved on this device'}
         </Text>
       </View>
-      {indexedSavings.length ? (
+      <View style={styles.filterRow}>
+        {(['all', 'sent', 'received'] as DirectionFilter[]).map((option) => (
+          <Pressable key={option} onPress={() => setDirection(option)} style={[styles.filterChip, { backgroundColor: direction === option ? colors.primary : colors.secondary }]}>
+            <Text style={[styles.filterText, { color: direction === option ? colors.primaryForeground : colors.foreground }]}>{option === 'all' ? 'All' : option === 'sent' ? 'Sent' : 'Received'}</Text>
+          </Pressable>
+        ))}
+      </View>
+      <View style={styles.filterRow}>
+        {TOKEN_FILTERS.map((option) => (
+          <Pressable key={option} onPress={() => setTokenFilter(option)} style={[styles.filterChip, { backgroundColor: tokenFilter === option ? colors.primary : colors.secondary }]}>
+            <Text style={[styles.filterText, { color: tokenFilter === option ? colors.primaryForeground : colors.foreground }]}>{option === 'ALL' ? 'All tokens' : option}</Text>
+          </Pressable>
+        ))}
+      </View>
+      <View style={[styles.searchRow, { backgroundColor: colors.secondary }]}>
+        <Feather name="search" size={15} color={colors.mutedForeground} />
+        <TextInput
+          accessibilityLabel="Search by address or transaction hash"
+          value={query}
+          onChangeText={setQuery}
+          placeholder="Search address or tx hash"
+          placeholderTextColor={colors.mutedForeground}
+          autoCapitalize="none"
+          autoCorrect={false}
+          style={[styles.searchInput, { color: colors.foreground }]}
+        />
+        {query ? (
+          <Pressable accessibilityRole="button" accessibilityLabel="Clear search" onPress={() => setQuery('')}>
+            <Feather name="x" size={15} color={colors.mutedForeground} />
+          </Pressable>
+        ) : null}
+      </View>
+      {indexedSavings.length && direction !== 'received' ? (
         <View style={styles.list}>
           <Text style={[styles.sectionTitle, { color: colors.foreground }]}>Savings activity</Text>
           {indexedSavings.map((item) => {
@@ -61,9 +126,9 @@ export default function ActivityScreen() {
           })}
         </View>
       ) : null}
-      {transfers.length ? (
+      {filtered.length ? (
         <View style={styles.list}>
-          {transfers.map((entry) => {
+          {filtered.map((entry) => {
             if ('indexed' in entry) {
               const transfer = entry.indexed;
               const date = new Date(transfer.createdAt);
@@ -186,11 +251,11 @@ export default function ActivityScreen() {
       ) : (
         <Card style={styles.empty}>
           <View style={[styles.emptyIcon, { backgroundColor: colors.secondary }]}>
-            <Feather name="clock" size={19} color={colors.foreground} />
+            <Feather name="search" size={19} color={colors.foreground} />
           </View>
-          <Text style={[styles.emptyTitle, { color: colors.foreground }]}>No activity yet</Text>
+          <Text style={[styles.emptyTitle, { color: colors.foreground }]}>{transfers.length ? 'No matches' : 'No activity yet'}</Text>
           <Text style={[styles.emptyText, { color: colors.mutedForeground }]}>
-            Confirmed token movements and saved transfers will appear here.
+            {transfers.length ? 'Try a different filter or search.' : 'Confirmed token movements and saved transfers will appear here.'}
           </Text>
         </Card>
       )}
@@ -209,6 +274,11 @@ const styles = StyleSheet.create({
   sourceBanner: { minHeight: 36, borderRadius: 10, paddingHorizontal: 11, flexDirection: 'row', alignItems: 'center', gap: 8 },
   sourceDot: { width: 7, height: 7, borderRadius: 4 },
   sourceText: { fontSize: 10, fontFamily: 'Inter_500Medium' },
+  filterRow: { flexDirection: 'row', gap: 8 },
+  filterChip: { minHeight: 34, paddingHorizontal: 14, borderRadius: 11, alignItems: 'center', justifyContent: 'center' },
+  filterText: { fontSize: 11, fontFamily: 'Inter_600SemiBold' },
+  searchRow: { minHeight: 44, borderRadius: 12, paddingHorizontal: 12, flexDirection: 'row', alignItems: 'center', gap: 8 },
+  searchInput: { flex: 1, fontSize: 13, fontFamily: 'Inter_400Regular' },
   transferCard: { gap: 13, padding: 15 },
   cardTop: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: 8 },
   transferType: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 10 },

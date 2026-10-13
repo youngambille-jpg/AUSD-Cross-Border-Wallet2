@@ -24,6 +24,7 @@ import type { PasskeyCredentialMetadata } from '@category-labs/mera';
 import {
   AGORA_TESTNET_WHITELISTER,
   MONAD_TESTNET,
+  faucetAbi,
   pairAbi,
   simulateTokenSwap,
   whitelisterAbi,
@@ -504,6 +505,33 @@ export async function sendSponsoredAUSDTransfer(
   amount: string,
 ): Promise<SponsoredTransferResult> {
   return sendSponsoredTokenTransfer(account, recipient, amount, 'AUSD');
+}
+
+export interface FaucetClaimResult extends SponsoredTransferResult {
+  /** Human-readable AUSD amount dripped by the faucet. */
+  amount: string;
+}
+
+/**
+ * Claims AUSD testnet tokens from Agora's faucet contract through a sponsored
+ * UserOperation (the fresh wallet holds no MON, so it cannot self-pay).
+ * Follows stable-swap-examples getTestnetTokens: requestFunds(receiver).
+ */
+export async function claimFaucetTokens(account: MeraPasskeyProfile): Promise<FaucetClaimResult> {
+  const [dripRaw, maxOwnRaw, balance] = await Promise.all([
+    publicClient.readContract({ address: MONAD_TESTNET.ausdFaucetAddress, abi: faucetAbi, functionName: 'faucetDripAmount' }),
+    publicClient.readContract({ address: MONAD_TESTNET.ausdFaucetAddress, abi: faucetAbi, functionName: 'maxAmountToOwn' }),
+    publicClient.readContract({ address: WALLET_TOKENS.AUSD.address, abi: balanceAbi, functionName: 'balanceOf', args: [account.address as Address] }),
+  ]);
+  const decimals = WALLET_TOKENS.AUSD.decimals;
+  if (balance + dripRaw > maxOwnRaw) {
+    throw new Error(`The faucet caps holdings at ${formatUnits(maxOwnRaw, decimals)} AUSD and your wallet holds ${formatUnits(balance, decimals)}. Spend or swap some first.`);
+  }
+  const result = await sendSponsoredCalls(account, [{
+    to: MONAD_TESTNET.ausdFaucetAddress,
+    data: encodeFunctionData({ abi: faucetAbi, functionName: 'requestFunds', args: [account.address as Address] }),
+  }]);
+  return { ...result, amount: formatUnits(dripRaw, decimals) };
 }
 
 export async function sendSponsoredTokenTransfer(

@@ -33,10 +33,6 @@ function NativeTabLayout() {
         <NativeTabs.Trigger.Icon sf={{ default: 'chart.line.uptrend.xyaxis', selected: 'chart.line.uptrend.xyaxis' }} />
         <NativeTabs.Trigger.Label>Yield</NativeTabs.Trigger.Label>
       </NativeTabs.Trigger>
-      <NativeTabs.Trigger name="settings">
-        <NativeTabs.Trigger.Icon sf={{ default: 'gearshape', selected: 'gearshape.fill' }} />
-        <NativeTabs.Trigger.Label>Settings</NativeTabs.Trigger.Label>
-      </NativeTabs.Trigger>
     </NativeTabs>
   );
 }
@@ -58,24 +54,34 @@ function ClassicTabLayout() {
         headerShown: false,
         tabBarStyle: {
           position: 'absolute',
+          left: 20,
+          right: 20,
+          bottom: isWeb ? 16 : 28,
+          height: isWeb ? 72 : 68,
+          borderRadius: 24,
           backgroundColor: isIOS ? 'transparent' : colors.background,
-          borderTopWidth: isWeb ? 1 : 0,
-          borderTopColor: colors.border,
-          elevation: 0,
-          ...(isWeb ? { height: 84 } : {}),
+          borderTopWidth: 0,
+          borderWidth: StyleSheet.hairlineWidth,
+          borderColor: colors.border,
+          elevation: 8,
+          shadowColor: '#000000',
+          shadowOpacity: 0.12,
+          shadowRadius: 16,
+          shadowOffset: { width: 0, height: 8 },
+          paddingTop: 6,
         },
         tabBarBackground: () =>
           isIOS ? (
             <BlurView
               intensity={100}
               tint={isDark ? 'dark' : 'light'}
-              style={StyleSheet.absoluteFill}
+              style={[StyleSheet.absoluteFill, { borderRadius: 24, overflow: 'hidden' }]}
             />
           ) : isWeb ? (
             <View
               style={[
                 StyleSheet.absoluteFill,
-                { backgroundColor: colors.background },
+                { backgroundColor: colors.background, borderRadius: 24, overflow: 'hidden' },
               ]}
             />
           ) : null,
@@ -96,7 +102,8 @@ function ClassicTabLayout() {
       <Tabs.Screen name="savings" options={{ title: 'Savings', tabBarIcon: ({ color }) => <Feather name="target" size={22} color={color} /> }} />
       <Tabs.Screen name="swap" options={{ title: 'Swap', tabBarIcon: ({ color }) => <Feather name="repeat" size={22} color={color} /> }} />
       <Tabs.Screen name="yield" options={{ title: 'Yield', tabBarIcon: ({ color }) => <Feather name="trending-up" size={22} color={color} /> }} />
-      <Tabs.Screen name="settings" options={{ title: 'Settings', tabBarIcon: ({ color }) => <Feather name="settings" size={22} color={color} /> }} />
+      <Tabs.Screen name="activity" options={{ href: null }} />
+      <Tabs.Screen name="settings" options={{ href: null }} />
       <Tabs.Screen name="onramp" options={{ href: null }} />
       <Tabs.Screen name="offramp" options={{ href: null }} />
       <Tabs.Screen name="profile" options={{ href: null }} />
