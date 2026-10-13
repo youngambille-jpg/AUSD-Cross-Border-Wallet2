@@ -155,7 +155,17 @@ export default function WalletHome() {
     : transfers.slice(0, 3).map((item) => ({ local: item }));
   const ausd = isMeraWallet ? assetBalances[WALLET_TOKENS.AUSD.address.toLowerCase()] ?? null : balance;
   const usdc = isMeraWallet ? assetBalances[WALLET_TOKENS.USDC.address.toLowerCase()] ?? null : 0;
-  const totalBalance = ausd === null || usdc === null ? null : ausd + usdc;
+  const totalBalance = useMemo(() => {
+    let total = 0;
+    for (const asset of assets) {
+      const amount = isMeraWallet
+        ? assetBalances[asset.address.toLowerCase()]
+        : asset.symbol === 'AUSD' ? balance : 0;
+      if (amount === null || amount === undefined) return null;
+      total += amount;
+    }
+    return total;
+  }, [assets, assetBalances, balance, isMeraWallet]);
   const visibleAssets = useMemo(() => {
     if (!isMeraWallet || !hideZero) return assets;
     return assets.filter((asset) => {
@@ -167,6 +177,10 @@ export default function WalletHome() {
   // top-up could succeed, not only when the wallet is empty. Demo wallets see
   // it too; claiming prompts passkey setup.
   const showFaucet = !isMeraWallet || ausd === null || ausd < 100_000;
+  const firstName = profile?.displayName?.trim().split(/\s+/)[0] ?? '';
+  const hour = new Date().getHours();
+  const daypart = hour < 12 ? 'morning' : hour < 17 ? 'afternoon' : 'evening';
+  const greeting = firstName ? `Good ${daypart}, ${firstName}` : 'Your money';
   const drawerPan = PanResponder.create({
     onMoveShouldSetPanResponder: (_event, gesture) => gesture.dy > 5,
     onPanResponderMove: (_event, gesture) => setDrawerOffset(Math.max(0, gesture.dy)),
@@ -179,9 +193,9 @@ export default function WalletHome() {
   return (
     <Page contentStyle={styles.page} refreshing={refreshing} onRefresh={() => { void refreshHome(); }}>
       <View style={styles.header}>
-        <View>
+        <View style={styles.headerCopy}>
           <Eyebrow>MONAD WALLET</Eyebrow>
-          <Text style={[styles.pageTitle, { color: colors.foreground }]}>Your money</Text>
+          <Text numberOfLines={2} style={[styles.pageTitle, { color: colors.foreground }]}>{greeting}</Text>
         </View>
         <Pressable
           accessibilityRole="button"
@@ -203,7 +217,7 @@ export default function WalletHome() {
         </View>
         <Text style={[styles.balanceAmount, { color: '#ffffff' }]}>${totalBalance === null ? '—' : money(totalBalance)}</Text>
         <Text style={[styles.balanceFoot, { color: 'rgba(255,255,255,0.65)' }]}>
-          {chainBalanceError || (isMeraWallet ? 'AUSD + USDC on Monad' : 'Demo balance · AUSD')}
+          {chainBalanceError || (isMeraWallet ? `${assets.length} token${assets.length === 1 ? '' : 's'} on Monad` : 'Balance · AUSD')}
         </Text>
       </Card>
 
@@ -506,7 +520,8 @@ function QuickAction({
 
 const styles = StyleSheet.create({
   page: { gap: 14, paddingTop: 12, paddingBottom: 24 },
-  header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 12 },
+  headerCopy: { flex: 1 },
   pageTitle: { fontSize: 22, lineHeight: 28, letterSpacing: -0.6, fontFamily: 'Inter_600SemiBold', marginTop: 2 },
   profileButton: { width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center' },
   balanceCard: { minHeight: 138, justifyContent: 'space-between', padding: 16, borderRadius: 20 },

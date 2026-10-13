@@ -21,6 +21,8 @@ import { useColors } from '@/hooks/useColors';
 import { useWallet } from '@/state/wallet-context';
 import { getTokenBalance } from '@/services/passkey';
 import { loadContacts, type WalletContact } from '@/services/contacts';
+import { loadSavingsGoals, type SavingsGoal } from '@/services/savings-goals';
+import { calculateAutoSaveBreakdown } from '@/services/savings-pockets';
 import { simulateTokenSwap, type SettlementQuote } from '@/services/settlement';
 import { TRANSFER_TOKENS, WALLET_TOKENS, type WalletToken } from '@/services/tokens';
 import { PrimaryButton } from '@/components/Primitives';
@@ -55,6 +57,12 @@ export default function SendDrawer() {
   const [contacts, setContacts] = useState<WalletContact[]>([]);
   const [contactsLoading, setContactsLoading] = useState(false);
   const [contactsError, setContactsError] = useState('');
+  const [saveWithPocket, setSaveWithPocket] = useState(false);
+  const [pockets, setPockets] = useState<SavingsGoal[]>([]);
+  const [pocketsLoading, setPocketsLoading] = useState(false);
+  const [pocketsError, setPocketsError] = useState('');
+  const [pocketPickerOpen, setPocketPickerOpen] = useState(false);
+  const [selectedPocketId, setSelectedPocketId] = useState('');
   const [quote, setQuote] = useState<SettlementQuote | null>(null);
   const [quoteLoading, setQuoteLoading] = useState(false);
   const [quoteError, setQuoteError] = useState('');
@@ -128,6 +136,21 @@ export default function SendDrawer() {
     return '';
   }, [recipient, profile?.address]);
 
+  const onchainPockets = useMemo(() => pockets.filter((goal) => Boolean(goal.pocketId)), [pockets]);
+  const selectedPocket = onchainPockets.find((goal) => goal.id === selectedPocketId) ?? null;
+  const selectedRateBps = selectedPocket?.autoSaveBps ?? 0;
+  const autoSaveOn = saveWithPocket && sendMode === 'direct' && token === 'AUSD';
+  const saveBreakdown = useMemo(() => {
+    if (!autoSaveOn || !selectedPocket || selectedRateBps <= 0) return null;
+    if (!/^\d+(\.\d{1,6})?$/.test(amount) || Number(amount) <= 0) return null;
+    try {
+      return calculateAutoSaveBreakdown(amount, selectedRateBps);
+    } catch {
+      return null;
+    }
+  }, [autoSaveOn, selectedPocket, selectedRateBps, amount]);
+  const totalDebit = saveBreakdown ? Number(saveBreakdown.totalDebit) : parsedAmount;
+
   useEffect(() => {
     setQuote(null);
     setQuoteError('');
@@ -148,8 +171,39 @@ export default function SendDrawer() {
     return () => { active = false; clearTimeout(timer); };
   }, [amount, sendMode, settlementOutput, activeDecimals, profile?.address, profile?.mode]);
 
-  async function openContacts() {
-    setContactsError('');
+  async function toggleSaveWithPocket() {
+    if (saveWithPocket) {
+      setSaveWithPocket(false);
+      return;
+    }
+    setPocketsError('');
+    if (!account) {
+      setPocketsError('Create a Mera passkey wallet to use pay + auto-save.');
+      return;
+    }
+    if (token !== 'AUSD' || sendMode !== 'direct') {
+      setPocketsError('Pay + auto-save works with direct AUSD transfers.');
+      return;
+    }
+    setSaveWithPocket(true);
+    setPocketsLoading(true);
+    try {
+      const goals = await loadSavingsGoals(account);
+      const active = goals.filter((goal) => Boolean(goal.pocketId));
+      setPockets(active);
+      if (!active.length) {
+        setPocketsError('No active pockets yet. Create one in Savings first.');
+      } else if (!selectedPocketId || !active.some((goal) => goal.id === selectedPocketId)) {
+        const first = active[0];
+        setSelectedPocketId(first.id);
+      }
+    } catch (caught) {
+      setPocketsError(caught instanceof Error ? caught.message : 'Could not unlock your savings plan.');
+    } finally {
+      setPocketsLoading(false);
+    }
+  }
+  async function openContacts() {    setContactsError('');
     setContactsOpen(true);
     if (!account) {
       setContactsError('Unlock a Mera passkey wallet to read encrypted contacts.');
@@ -191,6 +245,7 @@ export default function SendDrawer() {
     setToken(next);
     setAmount('');
     setError('');
+    if (next !== 'AUSD') setSaveWithPocket(false);
     setTokenModalOpen(false);
   }
 
@@ -220,8 +275,22 @@ export default function SendDrawer() {
       setError(balanceError || 'Loading your testnet balance…');
       return;
     }
-    if (parsedAmount > balance) {
-      setError(`Available: ${money(balance)} ${sendMode === 'settlement' ? 'AUSD' : token}.`);
+    if (totalDebit > balance) {
+      setError(`Available: ${money(balance)} ${sendMode === 'settlement' ? 'AUSD' : token}${saveBreakdown ? ` (payment + savings needs ${money(totalDebit)})` : ''}.`);
+      return;
+    }
+    if (autoSaveOn) {
+      if (!selectedPocket?.pocketId || selectedRateBps <= 0) {
+        setError('Choose an active savings pocket first.');
+        return;
+      }
+      router.push({
+        pathname: '/review',
+        params: {
+          mode: 'autosave', recipient: recipient.trim(), recipientName, amount, token: 'AUSD',
+          pocketId: selectedPocket.pocketId!, goalName: selectedPocket.name, autoSaveBps: String(selectedRateBps),
+        },
+      });
       return;
     }
     if (sendMode === 'settlement') {
@@ -297,7 +366,7 @@ export default function SendDrawer() {
               <Pressable onPress={() => { setSendMode('direct'); setError(''); }} style={[styles.modeOption, sendMode === 'direct' && { backgroundColor: colors.background }]}>
                 <Text style={[styles.modeText, { color: sendMode === 'direct' ? colors.foreground : colors.mutedForeground }]}>Token transfer</Text>
               </Pressable>
-              <Pressable onPress={() => { setSendMode('settlement'); setError(''); }} style={[styles.modeOption, sendMode === 'settlement' && { backgroundColor: colors.background }]}>
+              <Pressable onPress={() => { setSendMode('settlement'); setSaveWithPocket(false); setError(''); }} style={[styles.modeOption, sendMode === 'settlement' && { backgroundColor: colors.background }]}>
                 <Text style={[styles.modeText, { color: sendMode === 'settlement' ? colors.foreground : colors.mutedForeground }]}>Cross-border</Text>
               </Pressable>
             </View>
@@ -373,6 +442,68 @@ export default function SendDrawer() {
               </View>
             </View>
 
+            {sendMode === 'direct' && token === 'AUSD' ? (
+              <View style={styles.saveBlock}>
+                <Pressable
+                  accessibilityRole="checkbox"
+                  accessibilityState={{ checked: saveWithPocket }}
+                  accessibilityLabel="Pay with auto-save"
+                  onPress={() => void toggleSaveWithPocket()}
+                  style={[styles.saveToggle, { backgroundColor: colors.secondary }]}
+                >
+                  <View style={[styles.checkbox, { borderColor: saveWithPocket ? colors.primary : colors.mutedForeground, backgroundColor: saveWithPocket ? colors.primary : 'transparent' }]}>
+                    {saveWithPocket ? <Feather name="check" size={13} color={colors.primaryForeground} /> : null}
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={[styles.saveTitle, { color: colors.foreground }]}>
+                      {saveWithPocket && selectedPocket
+                        ? `Save ${selectedRateBps / 100}% to ${selectedPocket.name}`
+                        : 'Pay + auto-save'}
+                    </Text>
+                    <Text style={[styles.saveSub, { color: colors.mutedForeground }]}>
+                      {saveWithPocket ? 'Split shown below · verified again at review' : 'Skim a % into a savings pocket'}
+                    </Text>
+                  </View>
+                  {saveWithPocket ? <Feather name="chevron-down" size={16} color={colors.mutedForeground} /> : null}
+                </Pressable>
+                {pocketsLoading ? <Text style={[styles.saveSub, { color: colors.mutedForeground }]}>Unlocking your savings plan…</Text> : null}
+                {pocketsError ? <Text style={[styles.fieldError, { color: colors.destructive }]}>{pocketsError}</Text> : null}
+                {saveWithPocket && !pocketsLoading && onchainPockets.length > 0 ? (
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel="Choose savings pocket"
+                    onPress={() => setPocketPickerOpen(true)}
+                    style={[styles.pocketPicker, { backgroundColor: colors.secondary }]}
+                  >
+                    <Feather name="target" size={15} color={colors.primary} />
+                    <View style={{ flex: 1 }}>
+                      <Text style={[styles.tokenPickerTitle, { color: colors.foreground }]}>
+                        {selectedPocket ? `${selectedPocket.name} · ${selectedRateBps / 100}%` : 'Choose pocket'}
+                      </Text>
+                      <Text style={[styles.tokenPickerSub, { color: colors.mutedForeground }]}>Change rates in Savings</Text>
+                    </View>
+                    <Feather name="chevron-down" size={16} color={colors.mutedForeground} />
+                  </Pressable>
+                ) : null}
+                {saveBreakdown ? (
+                  <View style={[styles.saveSplit, { backgroundColor: colors.secondary }]}>
+                    <View style={styles.splitLine}>
+                      <Text style={[styles.splitLabel, { color: colors.mutedForeground }]}>RECIPIENT</Text>
+                      <Text style={[styles.splitValue, { color: colors.foreground }]}>{money(Number(saveBreakdown.paymentAmount))} AUSD</Text>
+                    </View>
+                    <View style={styles.splitLine}>
+                      <Text style={[styles.splitLabel, { color: colors.mutedForeground }]}>AUTO-SAVE</Text>
+                      <Text style={[styles.splitValue, { color: colors.primary }]}>+{money(Number(saveBreakdown.savedAmount))} AUSD</Text>
+                    </View>
+                    <View style={styles.splitLine}>
+                      <Text style={[styles.splitLabel, { color: colors.mutedForeground }]}>TOTAL DEBIT</Text>
+                      <Text style={[styles.splitValue, { color: colors.foreground }]}>{money(Number(saveBreakdown.totalDebit))} AUSD</Text>
+                    </View>
+                  </View>
+                ) : null}
+              </View>
+            ) : null}
+
             {sendMode === 'settlement' ? (
               <View style={[styles.quotePanel, { backgroundColor: colors.secondary }]}>
                 <View style={styles.quoteLine}>
@@ -447,7 +578,7 @@ export default function SendDrawer() {
             </View>
             {sendMode === 'settlement' ? <Text style={[styles.firstTimeNote, { color: colors.mutedForeground }]}>First swap may include one-time testnet access and token approval.</Text> : null}
             {error ? <Text style={[styles.error, { color: colors.destructive }]}>{error}</Text> : null}
-            <PrimaryButton label={sendMode === 'direct' ? 'Review transfer' : 'Review settlement'} icon="arrow-right" onPress={continueToReview} disabled={sendMode === 'settlement' && (!quote || quoteLoading || !!quoteError)} />
+            <PrimaryButton label={autoSaveOn && selectedPocket ? 'Review payment + save' : sendMode === 'direct' ? 'Review transfer' : 'Review settlement'} icon="arrow-right" onPress={continueToReview} disabled={sendMode === 'settlement' && (!quote || quoteLoading || !!quoteError)} />
           </ScrollView>
         </View>
       </KeyboardAvoidingView>
@@ -511,6 +642,37 @@ export default function SendDrawer() {
           </View>
         </View>
       </Modal>
+
+      <Modal visible={pocketPickerOpen} transparent animationType="fade" onRequestClose={() => setPocketPickerOpen(false)}>
+        <View style={styles.modalOverlay}>
+          <Pressable style={StyleSheet.absoluteFill} onPress={() => setPocketPickerOpen(false)} accessibilityLabel="Close pocket picker" />
+          <View style={[styles.modalCard, { backgroundColor: colors.background }]}>
+            <Text style={[styles.modalTitle, { color: colors.foreground }]}>Save into</Text>
+            {onchainPockets.map((goal) => {
+              const rate = goal.autoSaveBps ?? 0;
+              const active = goal.id === selectedPocketId;
+              return (
+                <Pressable
+                  key={goal.id}
+                  onPress={() => { setSelectedPocketId(goal.id); setPocketPickerOpen(false); }}
+                  style={[styles.tokenRow, { backgroundColor: active ? colors.secondary : 'transparent' }]}
+                >
+                  <View style={[styles.tokenBadge, { backgroundColor: active ? colors.background : colors.secondary }]}>
+                    <Feather name="target" size={15} color={colors.primary} />
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={[styles.tokenPickerTitle, { color: colors.foreground }]}>{goal.name}</Text>
+                    <Text style={[styles.tokenPickerSub, { color: colors.mutedForeground }]}>Auto-save {rate / 100}% of each payment</Text>
+                  </View>
+                  <Text style={[styles.rateBadge, { color: colors.primary }]}>{rate / 100}%</Text>
+                  {active ? <Feather name="check" size={17} color={colors.primary} /> : null}
+                </Pressable>
+              );
+            })}
+            <Text style={[styles.tokenPickerSub, { color: colors.mutedForeground }]}>Rates are set per goal. Change them in Savings.</Text>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -551,6 +713,17 @@ const styles = StyleSheet.create({
   quickChip: { minHeight: 32, paddingHorizontal: 14, borderRadius: 10, alignItems: 'center', justifyContent: 'center' },
   quickText: { fontSize: 11, fontFamily: 'Inter_700Bold' },
   recipientBlock: { gap: 8 },
+  saveBlock: { gap: 8 },
+  saveToggle: { borderRadius: 14, padding: 12, flexDirection: 'row', alignItems: 'center', gap: 10 },
+  checkbox: { width: 22, height: 22, borderRadius: 7, borderWidth: 1.5, alignItems: 'center', justifyContent: 'center' },
+  saveTitle: { fontSize: 13, fontFamily: 'Inter_600SemiBold' },
+  saveSub: { fontSize: 11, marginTop: 2, fontFamily: 'Inter_400Regular' },
+  pocketPicker: { borderRadius: 14, padding: 12, flexDirection: 'row', alignItems: 'center', gap: 10 },
+  saveSplit: { borderRadius: 14, padding: 12, gap: 8 },
+  splitLine: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  splitLabel: { fontSize: 10, letterSpacing: 0.7, fontFamily: 'Inter_600SemiBold' },
+  splitValue: { fontSize: 13, fontFamily: 'Inter_600SemiBold' },
+  rateBadge: { fontSize: 13, fontFamily: 'Inter_700Bold' },
   contactChip: { borderRadius: 14, padding: 10, flexDirection: 'row', alignItems: 'center', gap: 10 },
   contactAvatar: { width: 34, height: 34, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
   contactName: { fontSize: 13, fontFamily: 'Inter_600SemiBold' },

@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { Linking, Pressable, StyleSheet, Text, View } from 'react-native';
 import { Feather } from '@expo/vector-icons';
+import * as Clipboard from 'expo-clipboard';
 import { router } from 'expo-router';
 import { useColors } from '@/hooks/useColors';
 import { useWallet } from '@/state/wallet-context';
@@ -8,7 +9,6 @@ import { formatSupply, getAgoraMetrics } from '@/services/agora';
 import { MONAD_TESTNET } from '@/services/settlement';
 import {
   Card,
-  Divider,
   Eyebrow,
   InlineNotice,
   Page,
@@ -22,6 +22,7 @@ export default function ProfileScreen() {
   const [supply, setSupply] = useState<string | null>(null);
   const [metricsStatus, setMetricsStatus] = useState('Loading Agora public metrics…');
   const [loggingOut, setLoggingOut] = useState(false);
+  const [copied, setCopied] = useState<string | null>(null);
 
   useEffect(() => {
     let mounted = true;
@@ -48,6 +49,13 @@ export default function ProfileScreen() {
     };
   }, []);
 
+  async function copyText(text: string, key: string) {
+    if (!text) return;
+    await Clipboard.setStringAsync(text);
+    setCopied(key);
+    setTimeout(() => setCopied((current) => (current === key ? null : current)), 1600);
+  }
+
   async function disconnect() {
     setLoggingOut(true);
     try {
@@ -61,93 +69,131 @@ export default function ProfileScreen() {
 
   return (
     <Page contentStyle={styles.page}>
-      <Eyebrow>Account</Eyebrow>
-      <Title>Profile & network</Title>
+      <Eyebrow>ACCOUNT</Eyebrow>
+      <Title size={24}>Profile</Title>
 
-      <Card style={styles.profileCard}>
-        <View style={[styles.profileAvatar, { backgroundColor: colors.secondary }]}>
-          <Text style={[styles.avatarText, { color: colors.foreground }]}>
-            {(profile?.displayName[0] ?? 'A').toUpperCase()}
+      <Card style={[styles.hero, { backgroundColor: colors.foreground, borderWidth: 0 }]}>
+        <View style={[styles.avatar, { backgroundColor: colors.primarySoft }]}>
+          <Text style={[styles.avatarText, { color: colors.primary }]}>
+            {(profile?.displayName?.[0] ?? 'A').toUpperCase()}
           </Text>
         </View>
-        <View style={styles.profileInfo}>
-          <Text style={[styles.profileName, { color: colors.foreground }]}>
+        <View style={styles.heroCopy}>
+          <Text numberOfLines={1} style={[styles.heroName, { color: '#ffffff' }]}>
             {profile?.displayName ?? 'Wallet user'}
           </Text>
-          <Text style={[styles.profileEmail, { color: colors.mutedForeground }]}>
-            {profile?.email}
-          </Text>
-        </View>
-        <View style={[styles.modeChip, { backgroundColor: colors.secondary }]}>
-          <Text style={[styles.modeText, { color: colors.mutedForeground }]}>
-            {profile?.mode === 'mera' ? 'PASSKEY' : 'DEMO'}
-          </Text>
-        </View>
-      </Card>
-
-      <Card style={styles.metricsCard}>
-        <View style={styles.cardHeader}>
-          <Text style={[styles.cardTitle, { color: colors.foreground }]}>AUSD in circulation</Text>
-          <Feather name="activity" size={16} color={colors.primary} />
-        </View>
-        <Text style={[styles.supply, { color: colors.foreground }]}>
-          {supply ? `${supply} AUSD` : '—'}
-        </Text>
-        <Text style={[styles.metricCaption, { color: colors.mutedForeground }]}>{metricsStatus}</Text>
-        <Text style={[styles.metricDisclaimer, { color: colors.mutedForeground }]}>
-          Read from Agora’s public metrics API. This is not your wallet balance.
-        </Text>
-      </Card>
-
-      <Card style={styles.detailCard}>
-        <View style={styles.cardHeader}>
-          <View>
-            <Text style={[styles.cardTitle, { color: colors.foreground }]}>Monad Testnet</Text>
-            <Text style={[styles.subLine, { color: colors.mutedForeground }]}>
-              Chain ID {MONAD_TESTNET.chainId}
+          {!!profile?.email && (
+            <Text numberOfLines={1} style={[styles.heroEmail, { color: 'rgba(255,255,255,0.65)' }]}>
+              {profile.email}
             </Text>
-          </View>
-          <View style={[styles.testnetBadge, { backgroundColor: colors.secondary }]}>
-            <Text style={[styles.badgeText, { color: colors.mutedForeground }]}>TEST NETWORK</Text>
+          )}
+          <View style={styles.chipRow}>
+            <View style={[styles.heroChip, { backgroundColor: 'rgba(255,255,255,0.14)' }]}>
+              <Text style={[styles.chipText, { color: '#ffffff' }]}>
+                {profile?.mode === 'mera' ? 'PASSKEY' : 'DEMO'}
+              </Text>
+            </View>
+            <View style={[styles.heroChip, { backgroundColor: 'rgba(255,255,255,0.14)' }]}>
+              <Text style={[styles.chipText, { color: '#ffffff' }]}>MONAD TESTNET</Text>
+            </View>
           </View>
         </View>
-        <Divider />
-        <Text style={[styles.contractCaption, { color: colors.mutedForeground }]}>
-          Agora Instant Settlement factory · Monad testnet
-        </Text>
-        <Text selectable style={[styles.address, { color: colors.foreground }]}>
-          {MONAD_TESTNET.factoryAddress}
-        </Text>
-        <Text style={[styles.metricCaption, { color: colors.mutedForeground }]}>Settlement quote reads · {MONAD_TESTNET.rpcUrl.includes('alchemy') ? 'Alchemy Monad RPC' : 'Monad public RPC'}</Text>
-        <Pressable
-          onPress={() => void Linking.openURL(MONAD_TESTNET.explorerUrl)}
-          style={({ pressed }) => [styles.explorerLink, { opacity: pressed ? 0.6 : 1 }]}
-        >
-          <Text style={[styles.explorerText, { color: colors.primary }]}>View on MonadVision</Text>
-          <Feather name="external-link" size={13} color={colors.primary} />
-        </Pressable>
       </Card>
 
       {profile?.address ? (
-        <Card style={styles.detailCard}>
-          <Text style={[styles.cardTitle, { color: colors.foreground }]}>Your Monad smart account</Text>
-          <Text selectable style={[styles.address, { color: colors.foreground }]}>
-            {profile.address}
-          </Text>
-          <Text style={[styles.metricCaption, { color: colors.mutedForeground }]}>
-            Counterfactual Kernel account. AUSD must be sent to this address. Mera signer: {profile.signerAddress ?? 'legacy account'}.
-          </Text>
-        </Card>
+        <>
+          <Text style={[styles.sectionLabel, { color: colors.mutedForeground }]}>WALLET</Text>
+          <Card style={[styles.group, { backgroundColor: colors.secondary, borderWidth: 0 }]}>
+            <View style={styles.rowTop}>
+              <Text style={[styles.groupTitle, { color: colors.foreground }]}>Smart account</Text>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Copy wallet address"
+                onPress={() => void copyText(profile.address ?? '', 'wallet')}
+                style={styles.inlineAction}
+              >
+                <Feather name={copied === 'wallet' ? 'check' : 'copy'} size={14} color={colors.primary} />
+                <Text style={[styles.inlineActionText, { color: colors.primary }]}>
+                  {copied === 'wallet' ? 'Copied' : 'Copy'}
+                </Text>
+              </Pressable>
+            </View>
+            <Text selectable style={[styles.address, { color: colors.foreground }]}>
+              {profile.address}
+            </Text>
+            <Text style={[styles.caption, { color: colors.mutedForeground }]}>
+              Send AUSD here. Mera signer: {profile.signerAddress ?? 'legacy account'}.
+            </Text>
+          </Card>
+        </>
       ) : null}
 
-      <Card style={styles.detailCard}>
-        <Text style={[styles.cardTitle, { color: colors.foreground }]}>Private contacts</Text>
-        <Text style={[styles.metricCaption, { color: colors.mutedForeground }]}>Save familiar names for smart-account addresses. Your address book is encrypted with Mera and stays private to you.</Text>
-        <PrimaryButton label="Manage contacts" icon="users" secondary onPress={() => router.push('/contacts')} />
+      <Text style={[styles.sectionLabel, { color: colors.mutedForeground }]}>NETWORK</Text>
+      <Card style={[styles.group, { backgroundColor: colors.secondary, borderWidth: 0 }]}>
+        <View style={styles.rowTop}>
+          <View>
+            <Text style={[styles.groupTitle, { color: colors.foreground }]}>Monad Testnet</Text>
+            <Text style={[styles.caption, { color: colors.mutedForeground }]}>
+              Chain ID {MONAD_TESTNET.chainId} · {MONAD_TESTNET.rpcUrl.includes('alchemy') ? 'Alchemy RPC' : 'Public RPC'}
+            </Text>
+          </View>
+          <Pressable
+            onPress={() => void Linking.openURL(MONAD_TESTNET.explorerUrl)}
+            style={({ pressed }) => [styles.inlineAction, { opacity: pressed ? 0.6 : 1 }]}
+          >
+            <Text style={[styles.inlineActionText, { color: colors.primary }]}>Explorer</Text>
+            <Feather name="external-link" size={13} color={colors.primary} />
+          </Pressable>
+        </View>
+        <Text style={[styles.caption, { color: colors.mutedForeground }]}>
+          Agora Instant Settlement factory
+        </Text>
+        <View style={styles.addressRow}>
+          <Text selectable numberOfLines={1} style={[styles.address, { color: colors.foreground, flex: 1 }]}>
+            {MONAD_TESTNET.factoryAddress}
+          </Text>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Copy factory address"
+            onPress={() => void copyText(MONAD_TESTNET.factoryAddress, 'factory')}
+          >
+            <Feather name={copied === 'factory' ? 'check' : 'copy'} size={14} color={colors.primary} />
+          </Pressable>
+        </View>
       </Card>
 
+      <Text style={[styles.sectionLabel, { color: colors.mutedForeground }]}>AUSD</Text>
+      <Card style={[styles.group, { backgroundColor: colors.secondary, borderWidth: 0 }]}>
+        <View style={styles.rowTop}>
+          <Text style={[styles.groupTitle, { color: colors.foreground }]}>In circulation</Text>
+          <Feather name="activity" size={15} color={colors.primary} />
+        </View>
+        <Text style={[styles.supply, { color: colors.foreground }]}>
+          {supply ? `${supply}` : '—'}
+        </Text>
+        <Text style={[styles.caption, { color: colors.mutedForeground }]}>
+          {metricsStatus} This is Agora's public supply, not your balance.
+        </Text>
+      </Card>
+
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel="Manage private contacts"
+        onPress={() => router.push('/contacts')}
+        style={({ pressed }) => [styles.contactsRow, { backgroundColor: colors.secondary, opacity: pressed ? 0.75 : 1 }]}
+      >
+        <View style={[styles.contactsIcon, { backgroundColor: colors.background }]}>
+          <Feather name="users" size={16} color={colors.primary} />
+        </View>
+        <View style={{ flex: 1, gap: 2 }}>
+          <Text style={[styles.groupTitle, { color: colors.foreground }]}>Private contacts</Text>
+          <Text style={[styles.caption, { color: colors.mutedForeground }]}>Names for addresses, encrypted with Mera</Text>
+        </View>
+        <Feather name="chevron-right" size={17} color={colors.mutedForeground} />
+      </Pressable>
+
       <InlineNotice icon="info" tone="warning">
-        Direct AUSD transfers and Agora swaps can submit sponsored transactions using test tokens on Monad testnet. Fiat onramp and offramp, card issuing, and cross-chain transfers are not connected yet.
+        Direct AUSD transfers and Agora swaps move test tokens on Monad testnet. Fiat onramp and offramp, card issuing, and cross-chain transfers are not connected yet.
       </InlineNotice>
 
       <PrimaryButton
@@ -162,27 +208,26 @@ export default function ProfileScreen() {
 }
 
 const styles = StyleSheet.create({
-  page: { gap: 14, paddingTop: 10 },
-  profileCard: { flexDirection: 'row', alignItems: 'center', padding: 14 },
-  profileAvatar: { width: 44, height: 44, borderRadius: 15, alignItems: 'center', justifyContent: 'center' },
-  avatarText: { fontSize: 16, fontFamily: 'Inter_600SemiBold' },
-  profileInfo: { flex: 1, gap: 3, marginLeft: 11 },
-  profileName: { fontSize: 14, fontFamily: 'Inter_600SemiBold' },
-  profileEmail: { fontSize: 11, fontFamily: 'Inter_400Regular' },
-  modeChip: { borderRadius: 6, paddingHorizontal: 8, paddingVertical: 5 },
-  modeText: { fontSize: 9, letterSpacing: 0.6, fontFamily: 'Inter_600SemiBold' },
-  metricsCard: { padding: 16, gap: 8 },
-  cardHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
-  cardTitle: { fontSize: 14, fontFamily: 'Inter_600SemiBold' },
-  supply: { fontSize: 24, letterSpacing: -0.8, fontFamily: 'Inter_600SemiBold' },
-  metricCaption: { fontSize: 10, lineHeight: 15, fontFamily: 'Inter_500Medium' },
-  metricDisclaimer: { fontSize: 10, lineHeight: 15, fontFamily: 'Inter_400Regular' },
-  detailCard: { padding: 16, gap: 10 },
-  subLine: { fontSize: 11, marginTop: 4, fontFamily: 'Inter_400Regular' },
-  testnetBadge: { paddingHorizontal: 8, paddingVertical: 5, borderRadius: 6 },
-  badgeText: { fontSize: 8, letterSpacing: 0.7, fontFamily: 'Inter_600SemiBold' },
-  contractCaption: { fontSize: 10, fontFamily: 'Inter_400Regular' },
+  page: { gap: 12, paddingTop: 10, paddingBottom: 32 },
+  hero: { flexDirection: 'row', alignItems: 'center', gap: 13, padding: 16, borderRadius: 20 },
+  avatar: { width: 52, height: 52, borderRadius: 18, alignItems: 'center', justifyContent: 'center' },
+  avatarText: { fontSize: 20, fontFamily: 'Inter_700Bold' },
+  heroCopy: { flex: 1, gap: 3 },
+  heroName: { fontSize: 19, fontFamily: 'Inter_600SemiBold' },
+  heroEmail: { fontSize: 12, fontFamily: 'Inter_400Regular' },
+  chipRow: { flexDirection: 'row', gap: 6, marginTop: 5 },
+  heroChip: { borderRadius: 7, paddingHorizontal: 8, paddingVertical: 5 },
+  chipText: { fontSize: 9, letterSpacing: 0.6, fontFamily: 'Inter_600SemiBold' },
+  sectionLabel: { fontSize: 10, letterSpacing: 1, fontFamily: 'Inter_600SemiBold', marginTop: 4 },
+  group: { gap: 8, padding: 15, borderRadius: 16 },
+  rowTop: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 10 },
+  groupTitle: { fontSize: 14, fontFamily: 'Inter_600SemiBold' },
+  inlineAction: { flexDirection: 'row', alignItems: 'center', gap: 5, paddingVertical: 4 },
+  inlineActionText: { fontSize: 12, fontFamily: 'Inter_600SemiBold' },
   address: { fontSize: 11, lineHeight: 16, fontFamily: 'Inter_500Medium' },
-  explorerLink: { alignSelf: 'flex-start', flexDirection: 'row', alignItems: 'center', gap: 5, paddingVertical: 4 },
-  explorerText: { fontSize: 11, fontFamily: 'Inter_600SemiBold' },
+  addressRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  caption: { fontSize: 11, lineHeight: 16, fontFamily: 'Inter_400Regular' },
+  supply: { fontSize: 22, letterSpacing: -0.5, fontFamily: 'Inter_600SemiBold' },
+  contactsRow: { borderRadius: 16, padding: 13, flexDirection: 'row', alignItems: 'center', gap: 11 },
+  contactsIcon: { width: 38, height: 38, borderRadius: 13, alignItems: 'center', justifyContent: 'center' },
 });
